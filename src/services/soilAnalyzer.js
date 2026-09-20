@@ -1,99 +1,87 @@
-const sharp = require('sharp');
+const config = require('../config');
 const { HttpError } = require('../utils/http');
 
-const clamp = (v, lo = 0, hi = 100) => Math.min(hi, Math.max(lo, v));
-const round1 = (v) => Math.round(v * 10) / 10;
+const NUMERIC_FIELDS = [
+  'health_score', 'soil_moisture', 'nutrient_n', 'nutrient_p', 'nutrient_k', 'disease_confidence',
+];
 
-// Placeholder heuristic model: derives scores from simple colour statistics
-// of the photo. It exists so the whole scan flow (upload -> result -> history
-// -> home summary) works end to end; replace `analyzeImage` with the trained
-// ML model when it is ready — the returned shape is the contract.
-async function analyzeImage(buffer, { cropType } = {}) {
-  let raw;
+// Upstream statuses that describe a problem with the request itself and are
+// safe to relay. Anything else (401/404/5xx...) means the analyzer is down or
+// misconfigured, which is our problem, not the client's -> 502.
+const RELAYED = new Set([400, 413, 422]);
+
+const upstreamMessage = (status, payload) => {
+  const detail = payload && payload.detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail) && detail[0] && detail[0].msg) {
+    return `Soil analyzer rejected the request: ${detail[0].msg}`;
+  }
+  return `Soil analyzer rejected the request (${status})`;
+};
+
+const isValidResult = (r) =>
+  r &&
+  typeof r.id === 'string' &&
+  typeof r.disease === 'string' &&
+  typeof r.created_at === 'string' &&
+  Array.isArray(r.recommendations) &&
+  NUMERIC_FIELDS.every((k) => typeof r[k] === 'number');
+
+// The analyzer validates the upload by its part Content-Type and rejects
+// application/octet-stream — which is what Flutter's MultipartFile.fromBytes
+// sends by default. So the type is decided here from the file's magic bytes,
+// with the client's declared type only as a fallback.
+const sniffImageType = (buf) => {
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (buf.length >= 12 && buf.toString('latin1', 0, 4) === 'RIFF' && buf.toString('latin1', 8, 12) === 'WEBP') return 'image/webp';
+  if (buf.length >= 6 && ['GIF87a', 'GIF89a'].includes(buf.toString('latin1', 0, 6))) return 'image/gif';
+  return null;
+};
+
+const uploadType = (buffer, declared) => {
+  const sniffed = sniffImageType(buffer);
+  if (sniffed) return sniffed;
+  return declared && declared.startsWith('image/') ? declared : 'application/octet-stream';
+};
+
+// Forwards the photo (and optional crop type) to the external Soil Sense
+// service at SOIL_ANALYZER_URL and returns its AnalysisResponse.
+async function analyzeImage({ buffer, filename, mimetype, deviceId, cropType }) {
+  const url = config.soilAnalyzerUrl;
+  if (!url) throw new HttpError(503, 'Soil analysis is not configured on the server');
+
+  const form = new FormData();
+  form.append('image', new Blob([buffer], { type: uploadType(buffer, mimetype) }), filename || 'scan.jpg');
+  form.append('metadata_json', JSON.stringify({ device_id: deviceId, ...(cropType ? { crop_type: cropType } : {}) }));
+
+  let response;
   try {
-    raw = await sharp(buffer, { failOn: 'error' })
-      .rotate()
-      .resize(64, 64, { fit: 'cover' })
-      .removeAlpha()
-      .toColourspace('srgb')
-      .raw()
-      .toBuffer();
+    response = await fetch(url, { method: 'POST', body: form, signal: AbortSignal.timeout(config.soilAnalyzerTimeoutMs) });
+  } catch (err) {
+    console.error(`Soil analyzer request to ${url} failed:`, err.message);
+    if (err.name === 'TimeoutError') throw new HttpError(504, 'The soil analysis service took too long to respond. Please try again.');
+    throw new HttpError(502, "Couldn't reach the soil analysis service. Please try again later.");
+  }
+
+  const text = await response.text();
+  let payload = null;
+  try {
+    payload = JSON.parse(text);
   } catch {
-    throw new HttpError(422, 'Could not read the uploaded file as an image');
+    // non-JSON body; handled below
   }
 
-  const pixels = raw.length / 3;
-  let sumR = 0;
-  let sumG = 0;
-  let sumB = 0;
-  let yellow = 0;
-  let white = 0;
-  for (let i = 0; i < raw.length; i += 3) {
-    const r = raw[i];
-    const g = raw[i + 1];
-    const b = raw[i + 2];
-    sumR += r;
-    sumG += g;
-    sumB += b;
-    if (r > 140 && g > 140 && b < 90 && Math.abs(r - g) < 70) yellow++;
-    if (r > 215 && g > 215 && b > 215) white++;
+  if (!response.ok) {
+    console.error(`Soil analyzer returned ${response.status}: ${text.slice(0, 300)}`);
+    if (RELAYED.has(response.status)) throw new HttpError(response.status, upstreamMessage(response.status, payload));
+    throw new HttpError(502, 'The soil analysis service returned an error. Please try again later.');
   }
-  const meanR = sumR / pixels;
-  const meanG = sumG / pixels;
-  const meanB = sumB / pixels;
-  const luminance = 0.299 * meanR + 0.587 * meanG + 0.114 * meanB;
-  const yellowShare = yellow / pixels;
-  const whiteShare = white / pixels;
-
-  const moisture = clamp(100 - (luminance / 255) * 90);
-  const nitrogen = clamp(55 + (meanG - (meanR + meanB) / 2) * 2.5);
-  const phosphorus = clamp(45 + (meanR - meanB) * 0.6);
-  const potassium = clamp(35 + luminance * 0.3);
-
-  let disease = 'No significant disease indicators';
-  let diseaseConfidence = clamp(100 - Math.max(yellowShare, whiteShare) * 100, 60, 95);
-  let diseaseTip = null;
-  if (yellowShare > 0.15) {
-    disease = 'Leaf yellowing indicators';
-    diseaseConfidence = clamp(50 + yellowShare * 100, 0, 95);
-    diseaseTip = 'Yellowing can point to nutrient stress or a fungal issue — inspect the leaves closely and consider a neem-oil spray.';
-  } else if (whiteShare > 0.12) {
-    disease = 'Powdery fungal residue indicators';
-    diseaseConfidence = clamp(50 + whiteShare * 100, 0, 95);
-    diseaseTip = 'Whitish patches may be powdery mildew — spray diluted neem oil or a buttermilk solution and improve airflow between plants.';
+  if (!isValidResult(payload)) {
+    console.error(`Soil analyzer returned an unexpected body: ${text.slice(0, 300)}`);
+    throw new HttpError(502, 'The soil analysis service returned an unexpected response.');
   }
-
-  const diseasePenalty = diseaseTip ? diseaseConfidence * 0.5 : 0;
-  const npkAverage = (nitrogen + phosphorus + potassium) / 3;
-  const moistureScore = clamp(100 - Math.abs(moisture - 55) * 2);
-  const health = clamp(0.45 * npkAverage + 0.25 * moistureScore + 0.3 * (100 - diseasePenalty));
-
-  const recommendations = [];
-  const nutrientTips = [
-    [nitrogen, 'Nitrogen is low — apply vermicompost or neem cake before the next watering.'],
-    [phosphorus, 'Phosphorus is low — mix bone meal or rock phosphate into compost and work it into the soil.'],
-    [potassium, 'Potassium is low — add wood ash or well-rotted compost around the root zone.'],
-  ];
-  nutrientTips.filter(([v]) => v < 40).sort((a, b) => a[0] - b[0]).forEach(([, tip]) => recommendations.push(tip));
-  if (moisture < 30) recommendations.push('Soil looks dry — irrigate lightly and add mulch to hold moisture.');
-  if (moisture > 80) recommendations.push('Soil looks waterlogged — improve drainage before the next irrigation.');
-  if (diseaseTip) recommendations.push(diseaseTip);
-  if (recommendations.length === 0) {
-    recommendations.push(
-      `No major issues detected${cropType ? ` for your ${cropType}` : ''} — keep up your current routine and rescan in two weeks.`,
-    );
-  }
-
-  return {
-    health_score: round1(health),
-    soil_moisture: round1(moisture),
-    nutrient_n: round1(nitrogen),
-    nutrient_p: round1(phosphorus),
-    nutrient_k: round1(potassium),
-    disease,
-    disease_confidence: round1(diseaseConfidence),
-    recommendations,
-  };
+  return payload;
 }
 
 module.exports = { analyzeImage };

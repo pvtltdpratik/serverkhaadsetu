@@ -29,7 +29,7 @@ Requires Node 20+. Data is persisted to `DATA_FILE` (default `./data/db.json`) a
 | GET | `/v1/history?device_id=` | up to 5 scans from the last 15 days, newest first |
 | GET | `/v1/scan/:id` | one scan (device-scoped) |
 
-The analyzer (`src/services/soilAnalyzer.js`) is a placeholder colour-statistics heuristic. Swap in the ML model there; keep the returned shape.
+Scans are forwarded to the external Soil Sense analyzer at `SOIL_ANALYZER_URL` (default `http://localhost:8000/v1/analyze`; set it empty to disable scanning). Results are stored here, so history, scan-by-id and the home recommendation work off this server.
 
 ### Weather
 `GET /v1/weather?lat=&lon=` — 5-day forecast + place name (Open-Meteo / BigDataCloud, cached 10 min).
@@ -83,6 +83,7 @@ The analyzer (`src/services/soilAnalyzer.js`) is a placeholder colour-statistics
 ## Deploying on EC2
 
 - Install Node 20+: `sudo dnf install -y nodejs20`.
+- Set `SOIL_ANALYZER_URL` to wherever the analyzer runs. `localhost:8000` only works if it runs on the same EC2 machine; otherwise use its private/public address and open the port in the security group.
 - Set `PORT`, `API_KEY` and `DATA_FILE` (e.g. `/var/lib/khaadsetu/db.json`, owned by `ec2-user`) as `Environment=` lines in the systemd unit.
 - **Nginx must allow photo uploads** — its default body limit is 1 MB. Add `client_max_body_size 10m;` inside the `server { }` block.
 - The JSON store is single-process. Run one instance; move to Postgres/DynamoDB behind `src/db/store.js` before scaling out.

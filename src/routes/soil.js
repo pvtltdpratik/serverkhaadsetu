@@ -1,6 +1,5 @@
 const express = require('express');
 const multer = require('multer');
-const crypto = require('crypto');
 const { HttpError, asyncHandler, str, deviceId } = require('../utils/http');
 const { analyzeImage } = require('../services/soilAnalyzer');
 const { analyzeLimiter } = require('../middleware/security');
@@ -9,8 +8,8 @@ const RETENTION_DAYS = 15;
 const MAX_HISTORY = 5;
 
 // No mimetype filter on purpose: the Flutter client uploads the image bytes
-// as application/octet-stream, so the real check is decoding it in the
-// analyzer (which rejects non-images with a 422).
+// as application/octet-stream, so validating the content is left to the
+// external analyzer (its 422 is relayed to the client).
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 8 * 1024 * 1024, files: 1, fields: 5 },
@@ -43,15 +42,30 @@ module.exports = (store) => {
       if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
         throw new HttpError(400, '"metadata_json" must be a JSON object');
       }
-      const device = str(metadata.device_id, 'metadata_json.device_id', { max: 100 });
-      const cropType = str(metadata.crop_type, 'metadata_json.crop_type', { max: 50, optional: true });
+      // The plant type may also arrive as plain `device_id` / `crop_type`
+      // (or `plant_type`) form fields; metadata_json wins when both are given.
+      const device = str(metadata.device_id ?? req.body.device_id ?? req.get('x-device-id'), 'metadata_json.device_id', { max: 100 });
+      const cropType = str(metadata.crop_type ?? req.body.crop_type ?? req.body.plant_type, 'metadata_json.crop_type', { max: 50, optional: true });
 
-      const analysis = await analyzeImage(req.file.buffer, { cropType });
+      const result = await analyzeImage({
+        buffer: req.file.buffer,
+        filename: req.file.originalname,
+        mimetype: req.file.mimetype,
+        deviceId: device,
+        cropType,
+      });
       const scan = {
-        id: crypto.randomUUID(),
-        created_at: new Date().toISOString(),
-        ...analysis,
-        metadata: { device_id: device, ...(cropType ? { crop_type: cropType } : {}) },
+        id: result.id,
+        created_at: result.created_at,
+        health_score: result.health_score,
+        soil_moisture: result.soil_moisture,
+        nutrient_n: result.nutrient_n,
+        nutrient_p: result.nutrient_p,
+        nutrient_k: result.nutrient_k,
+        disease: result.disease,
+        disease_confidence: result.disease_confidence,
+        recommendations: result.recommendations,
+        metadata: { ...(result.metadata || {}), device_id: device, ...(cropType ? { crop_type: cropType } : {}) },
       };
 
       // Prune everything past the retention window (and past the newest

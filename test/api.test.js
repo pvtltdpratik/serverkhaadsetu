@@ -2,14 +2,56 @@ process.env.NODE_ENV = 'test';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const sharp = require('sharp');
-const { createStore } = require('../src/db/store');
-const { createApp } = require('../src/app');
+const http = require('http');
+const crypto = require('crypto');
 
 let server;
 let base;
+let config;
+
+// Stand-in for the external Soil Sense service. `analyzer.mode` picks the
+// behaviour; `analyzer.lastRequest` records what was forwarded to it.
+const analyzer = { mode: 'ok', lastRequest: null, server: null };
+
+const startFakeAnalyzer = () =>
+  new Promise((resolve) => {
+    analyzer.server = http.createServer((req, res) => {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        analyzer.lastRequest = { method: req.method, url: req.url, contentType: req.headers['content-type'], body: Buffer.concat(chunks).toString('latin1') };
+        const send = (status, payload) => {
+          res.writeHead(status, { 'content-type': 'application/json' });
+          res.end(typeof payload === 'string' ? payload : JSON.stringify(payload));
+        };
+        if (analyzer.mode === 'reject') return send(422, { detail: [{ msg: 'Uploaded file is not an image' }] });
+        if (analyzer.mode === 'down') return send(500, { detail: 'boom' });
+        if (analyzer.mode === 'garbage') return send(201, { hello: 'world' });
+        if (analyzer.mode === 'slow') return; // never answers -> client times out
+        send(201, {
+          id: crypto.randomUUID(),
+          created_at: new Date().toISOString(),
+          health_score: 71.4,
+          soil_moisture: 52.3,
+          nutrient_n: 38.2,
+          nutrient_p: 66,
+          nutrient_k: 74.5,
+          disease: 'No significant disease indicators',
+          disease_confidence: 88,
+          recommendations: ['Nitrogen is low — apply vermicompost or neem cake before the next watering.'],
+          metadata: null,
+        });
+      });
+    });
+    analyzer.server.listen(0, () => resolve(analyzer.server.address().port));
+  });
 
 test.before(async () => {
+  const analyzerPort = await startFakeAnalyzer();
+  process.env.SOIL_ANALYZER_URL = `http://127.0.0.1:${analyzerPort}/v1/analyze`;
+  const { createStore } = require('../src/db/store');
+  const { createApp } = require('../src/app');
+  config = require('../src/config');
   const app = createApp(createStore(null));
   await new Promise((resolve) => {
     server = app.listen(0, resolve);
@@ -17,7 +59,10 @@ test.before(async () => {
   base = `http://127.0.0.1:${server.address().port}`;
 });
 
-test.after(() => server.close());
+test.after(() => {
+  server.close();
+  analyzer.server.close();
+});
 
 const call = async (method, path, { body, device, headers = {} } = {}) => {
   const res = await fetch(base + path, {
@@ -33,8 +78,8 @@ const call = async (method, path, { body, device, headers = {} } = {}) => {
   return { status: res.status, headers: res.headers, json: text ? JSON.parse(text) : null };
 };
 
-const greenPhoto = () =>
-  sharp({ create: { width: 80, height: 80, channels: 3, background: { r: 60, g: 140, b: 60 } } }).jpeg().toBuffer();
+// The fake analyzer never decodes the bytes, so any payload will do.
+const photo = async () => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from('fake-jpeg-bytes-0123456789')]);
 
 test('health and 404', async () => {
   assert.equal((await call('GET', '/health')).json.status, 'ok');
@@ -45,9 +90,22 @@ test('soil: analyze -> history -> scan by id, matching the Flutter contract', as
   const form = new FormData();
   form.append('metadata_json', JSON.stringify({ device_id: 'dev-soil', crop_type: 'tomato' }));
   // The Flutter client uploads as application/octet-stream.
-  form.append('image', new Blob([await greenPhoto()], { type: 'application/octet-stream' }), 'scan.jpg');
+  form.append('image', new Blob([await photo()], { type: 'application/octet-stream' }), 'scan.jpg');
   const analyzed = await call('POST', '/v1/analyze', { body: form });
   assert.equal(analyzed.status, 200);
+
+  // The image and the plant type really were forwarded to the analyzer.
+  const forwarded = analyzer.lastRequest;
+  assert.equal(forwarded.method, 'POST');
+  assert.equal(forwarded.url, '/v1/analyze');
+  assert.match(forwarded.contentType, /^multipart\/form-data/);
+  assert.ok(forwarded.body.includes('fake-jpeg-bytes-0123456789'));
+  assert.ok(forwarded.body.includes('name="image"'));
+  // Client said application/octet-stream; the analyzer must still see the real type.
+  assert.match(forwarded.body, /content-type: image\/jpeg/i);
+  assert.doesNotMatch(forwarded.body, /application\/octet-stream/i);
+  assert.ok(forwarded.body.includes('"crop_type":"tomato"'));
+  assert.ok(forwarded.body.includes('"device_id":"dev-soil"'));
   const scan = analyzed.json;
   for (const key of ['id', 'created_at', 'health_score', 'soil_moisture', 'nutrient_n', 'nutrient_p', 'nutrient_k', 'disease', 'disease_confidence']) {
     assert.ok(key in scan, `missing ${key}`);
@@ -67,23 +125,72 @@ test('soil: analyze -> history -> scan by id, matching the Flutter contract', as
   assert.ok(['nutrient', 'water', 'pest', 'harvest'].includes(rec.json.category));
 });
 
-test('soil: keeps only the 5 newest scans and rejects bad uploads', async () => {
+const scanForm = async (fields = { device_id: 'dev-many' }, { asMetadata = true } = {}) => {
+  const form = new FormData();
+  if (asMetadata) form.append('metadata_json', JSON.stringify(fields));
+  else for (const [k, v] of Object.entries(fields)) form.append(k, v);
+  form.append('image', new Blob([await photo()]), 'scan.jpg');
+  return form;
+};
+
+test('soil: keeps only the 5 newest scans', async () => {
   for (let i = 0; i < 7; i++) {
-    const form = new FormData();
-    form.append('metadata_json', JSON.stringify({ device_id: 'dev-many' }));
-    form.append('image', new Blob([await greenPhoto()]), 'scan.jpg');
-    assert.equal((await call('POST', '/v1/analyze', { body: form })).status, 200);
+    assert.equal((await call('POST', '/v1/analyze', { body: await scanForm() })).status, 200);
   }
   assert.equal((await call('GET', '/v1/history?device_id=dev-many')).json.length, 5);
+});
 
-  const bad = new FormData();
-  bad.append('metadata_json', JSON.stringify({ device_id: 'dev-many' }));
-  bad.append('image', new Blob(['not an image']), 'x.jpg');
-  assert.equal((await call('POST', '/v1/analyze', { body: bad })).status, 422);
+test('soil: plant type is optional and also accepted as a plain form field', async () => {
+  const bare = await call('POST', '/v1/analyze', { body: await scanForm({ device_id: 'dev-bare' }) });
+  assert.equal(bare.status, 200);
+  assert.ok(!analyzer.lastRequest.body.includes('crop_type'));
+  assert.ok(!('crop_type' in bare.json.metadata));
 
+  const plain = await call('POST', '/v1/analyze', { body: await scanForm({ device_id: 'dev-plain', plant_type: 'chilli' }, { asMetadata: false }) });
+  assert.equal(plain.status, 200);
+  assert.ok(analyzer.lastRequest.body.includes('"crop_type":"chilli"'));
+  assert.equal(plain.json.metadata.crop_type, 'chilli');
+});
+
+test('soil: request problems are rejected before or relayed from the analyzer', async () => {
   const noImage = new FormData();
   noImage.append('metadata_json', JSON.stringify({ device_id: 'dev-many' }));
   assert.equal((await call('POST', '/v1/analyze', { body: noImage })).status, 400);
+
+  const noDevice = await scanForm({});
+  assert.equal((await call('POST', '/v1/analyze', { body: noDevice })).status, 400);
+
+  analyzer.mode = 'reject';
+  const rejected = await call('POST', '/v1/analyze', { body: await scanForm() });
+  assert.equal(rejected.status, 422);
+  assert.match(rejected.json.error, /not an image/);
+  analyzer.mode = 'ok';
+});
+
+test('soil: analyzer failures become 502/504/503 and are never stored', async () => {
+  const before = (await call('GET', '/v1/history?device_id=dev-fail')).json.length;
+
+  for (const mode of ['down', 'garbage']) {
+    analyzer.mode = mode;
+    const res = await call('POST', '/v1/analyze', { body: await scanForm({ device_id: 'dev-fail' }) });
+    assert.equal(res.status, 502, mode);
+  }
+
+  const originalTimeout = config.soilAnalyzerTimeoutMs;
+  config.soilAnalyzerTimeoutMs = 150;
+  analyzer.mode = 'slow';
+  assert.equal((await call('POST', '/v1/analyze', { body: await scanForm({ device_id: 'dev-fail' }) })).status, 504);
+  config.soilAnalyzerTimeoutMs = originalTimeout;
+  analyzer.mode = 'ok';
+
+  const originalUrl = config.soilAnalyzerUrl;
+  config.soilAnalyzerUrl = '';
+  assert.equal((await call('POST', '/v1/analyze', { body: await scanForm({ device_id: 'dev-fail' }) })).status, 503);
+  config.soilAnalyzerUrl = 'http://127.0.0.1:1/v1/analyze'; // nothing listens here
+  assert.equal((await call('POST', '/v1/analyze', { body: await scanForm({ device_id: 'dev-fail' }) })).status, 502);
+  config.soilAnalyzerUrl = originalUrl;
+
+  assert.equal((await call('GET', '/v1/history?device_id=dev-fail')).json.length, before);
 });
 
 test('recommendation nudges a first scan when there is none', async () => {
