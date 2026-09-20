@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const { HttpError, str, num, body, sendList } = require('../utils/http');
 const { serializeOrder, newOrderId, findOrder, cancelOrder } = require('../services/orders');
 const { otpLimiter } = require('../middleware/security');
+const { notify } = require('../services/notifications');
 const config = require('../config');
 
 const ORDER_STATUSES = ['pending', 'readyForPickup', 'completed', 'cancelled'];
@@ -78,6 +79,12 @@ module.exports = (store) => {
     const order = findOrder(store, req.params.id);
     if (order.status === 'pending') {
       order.status = 'readyForPickup';
+      notify(store, order.deviceId, {
+        type: 'order',
+        title: 'Your order is ready for pickup',
+        body: `Show pickup code ${order.pickupOtp} at the village center to collect it.`,
+        refId: order.id,
+      });
       store.save();
     } else if (order.status !== 'readyForPickup') {
       throw new HttpError(409, `A ${order.status} order cannot be marked ready for pickup`);
@@ -97,13 +104,26 @@ module.exports = (store) => {
 
     order.status = 'completed';
     order.pickupOtp = null;
+    notify(store, order.deviceId, {
+      type: 'order',
+      title: 'Order collected',
+      body: 'Thank you! Your order has been handed over.',
+      refId: order.id,
+    });
     store.save();
     res.json(view(order));
   });
 
   router.post('/orders/:id/cancel', (req, res) => {
     const order = findOrder(store, req.params.id);
-    cancelOrder(store, order);
+    cancelOrder(store, order, () =>
+      notify(store, order.deviceId, {
+        type: 'order',
+        title: 'Your order was cancelled',
+        body: 'The village center cancelled this order. Contact them if you have questions.',
+        refId: order.id,
+      }),
+    );
     res.json(view(order));
   });
 

@@ -25,12 +25,15 @@ const findOrder = (store, id) => {
   return order;
 };
 
-const cancelOrder = (store, order) => {
+// `onCancelled` runs just before the save so any side effect (a notification)
+// is persisted in the same write as the status change.
+const cancelOrder = (store, order, onCancelled) => {
   if (order.status !== 'pending' && order.status !== 'readyForPickup') {
     throw new HttpError(409, `A ${order.status} order cannot be cancelled`);
   }
   order.status = 'cancelled';
   order.pickupOtp = null;
+  if (onCancelled) onCancelled();
   store.save();
 };
 

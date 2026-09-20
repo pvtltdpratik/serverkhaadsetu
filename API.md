@@ -104,7 +104,7 @@ Alternatives that also work: send `device_id` and `crop_type` (or `plant_type`) 
 ```
 - All scores are 0-100. `recommendations` always has at least one entry; the first is the most important (used for the home-card note).
 - `metadata.crop_type` is omitted when none was sent (your parser already treats it as nullable).
-- `id` and `created_at` come from the analyzer. `created_at` has no timezone suffix (e.g. `2026-09-20T16:04:24.676865`), so `DateTime.parse` gives a local-time value.
+- `id` comes from the analyzer. `created_at` is always an explicit UTC ISO string ending in `Z` (the analyzer itself sends naive UTC with no suffix; the server normalises it), so `DateTime.parse(...).toLocal()` shows the right local time.
 - Errors: `400` (no image, missing device id, bad metadata, or the analyzer says the image format is unsupported), `413` (too large), `422` (analyzer rejected the request; message relayed), `502` (analyzer unreachable or returned an error/unexpected body), `504` (analyzer took longer than 25 s), `503` (scanning disabled: `SOIL_ANALYZER_URL` empty). A failed scan is never stored.
 - This is exactly what `SoilHealthApiDataSource._parseResult` already reads.
 
@@ -140,16 +140,16 @@ No device id. `200`:
 ### `GET /v1/farmer/profile`
 `200`:
 ```json
-{ "name": "Pratik Kolhe", "village": "Shirur, Pune", "unreadNotificationCount": 3, "landHoldingHectares": 1.5 }
+{ "name": "Pratik Kolhe", "village": "Shirur, Pune", "unreadNotificationCount": 2, "landHoldingHectares": 1.5 }
 ```
-A device that never saved a profile gets defaults: `{"name":"Farmer","village":"","unreadNotificationCount":0,"landHoldingHectares":0}`.
+`unreadNotificationCount` is read-only: it is the number of unread notifications (see below). A device that never saved a profile gets defaults: `{"name":"Farmer","village":"","unreadNotificationCount":0,"landHoldingHectares":0}`.
 
 ### `PUT /v1/farmer/profile`
 Body - every field optional, send only what changes:
 ```json
-{ "name": "Pratik Kolhe", "village": "Shirur, Pune", "landHoldingHectares": 1.5, "unreadNotificationCount": 3 }
+{ "name": "Pratik Kolhe", "village": "Shirur, Pune", "landHoldingHectares": 1.5 }
 ```
-`200` returns the full profile. Limits: name <= 80, village <= 120, land 0-10000, count integer >= 0. Errors: `400`.
+`200` returns the full profile. Limits: name <= 80, village <= 120, land 0-10000. Errors: `400`.
 
 ### `GET /v1/farmer/recommendation`
 `200` - matches `SmartRecommendation`:
@@ -162,6 +162,41 @@ Body - every field optional, send only what changes:
 }
 ```
 Chosen from the device's latest scan, in priority order: dry soil (`water`) -> likely disease (`pest`) -> weakest nutrient below 70 (`nutrient`) -> all good (`harvest`). With **no scan yet** it returns `category: "nutrient"`, `actionLabel: "Scan soil"` - route that button to the scan screen instead of the report.
+
+### Notifications (device)
+
+The bell on the home screen. Notifications are created by the server when something happens; the app never creates them.
+
+| Event | `type` | `title` | `refId` |
+|---|---|---|---|
+| A soil scan finishes | `scan` | Soil scan complete | the scan id (deep-link to the result) |
+| A scheme application is submitted | `scheme` | Application submitted | the scheme id |
+| The farmer places an order | `order` | Order placed | the order id |
+| The village center marks it ready | `order` | Your order is ready for pickup | the order id |
+| The pickup OTP is verified | `order` | Order collected | the order id |
+| The village center cancels it | `order` | Your order was cancelled | the order id |
+
+`Notification`:
+```json
+{
+  "id": "notif-3f2c...",
+  "type": "scan",
+  "title": "Soil scan complete",
+  "body": "Your soil health score is 71/100. Tap to see the full report.",
+  "refId": "9b2c...-uuid",
+  "createdAt": "2026-09-20T16:04:24.000Z",
+  "read": false
+}
+```
+`type` is one of `scan`, `scheme`, `order`. Order notifications carry the pickup code in the body (it is the farmer's own code).
+
+| Endpoint | Notes |
+|---|---|
+| `GET /v1/farmer/notifications` | newest first; `?unread=true` for unread only; last 100 are kept per device |
+| `POST /v1/farmer/notifications/:id/read` | `200` the updated notification; `404` if it isn't this device's |
+| `POST /v1/farmer/notifications/read-all` | `200 {"unreadCount":0}` |
+
+The `unreadNotificationCount` in the profile is always the real number of unread notifications, so the badge clears after `read` / `read-all` (re-fetch the profile).
 
 ---
 

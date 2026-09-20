@@ -16,6 +16,16 @@ class Store {
   init() {
     if (this.file && fs.existsSync(this.file)) {
       this.data = JSON.parse(fs.readFileSync(this.file, 'utf8'));
+      // Upgrade path: a db.json written by an older version lacks any
+      // collection added since, so backfill those (empty for user data).
+      let changed = false;
+      for (const [key, value] of Object.entries(buildSeed())) {
+        if (!(key in this.data)) {
+          this.data[key] = value;
+          changed = true;
+        }
+      }
+      if (changed) this.save();
     } else {
       this.data = buildSeed();
       this.save();

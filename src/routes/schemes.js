@@ -1,5 +1,6 @@
 const express = require('express');
 const { HttpError, deviceId, sendList } = require('../utils/http');
+const { notify } = require('../services/notifications');
 
 module.exports = (store) => {
   const router = express.Router();
@@ -59,6 +60,12 @@ module.exports = (store) => {
     }
     application.status = 'submitted';
     application.appliedDate = new Date().toISOString();
+    notify(store, device, {
+      type: 'scheme',
+      title: 'Application submitted',
+      body: `Your application for ${scheme.name} has been submitted and is awaiting review.`,
+      refId: scheme.id,
+    });
     store.save();
     res.status(201).json(publicApplication(scheme.id, application));
   });

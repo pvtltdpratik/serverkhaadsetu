@@ -3,6 +3,7 @@ const multer = require('multer');
 const { HttpError, asyncHandler, str, deviceId } = require('../utils/http');
 const { analyzeImage } = require('../services/soilAnalyzer');
 const { analyzeLimiter } = require('../middleware/security');
+const { notify } = require('../services/notifications');
 
 const RETENTION_DAYS = 15;
 const MAX_HISTORY = 5;
@@ -73,6 +74,12 @@ module.exports = (store) => {
       const cutoff = Date.now() - RETENTION_DAYS * 24 * 3600 * 1000;
       store.data.scans = store.data.scans.filter((s) => new Date(s.created_at).getTime() >= cutoff);
       store.data.scans.push(scan);
+      notify(store, device, {
+        type: 'scan',
+        title: 'Soil scan complete',
+        body: `Your soil health score is ${Math.round(scan.health_score)}/100. Tap to see the full report.`,
+        refId: scan.id,
+      });
       const keep = new Set(recentScans(device).map((s) => s.id));
       store.data.scans = store.data.scans.filter((s) => s.metadata.device_id !== device || keep.has(s.id));
       store.save();

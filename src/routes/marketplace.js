@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { HttpError, str, num, oneOf, body, deviceId, sendList } = require('../utils/http');
 const { serializeOrder, newOrderId, newOtp, findOrder, cancelOrder } = require('../services/orders');
+const { notify } = require('../services/notifications');
 
 const CATEGORIES = ['fertilizer', 'organic', 'pesticide', 'seed', 'equipment'];
 const NUTRIENTS = ['nitrogen', 'phosphorus', 'potassium'];
@@ -90,6 +91,12 @@ module.exports = (store) => {
       deviceId: device,
     };
     store.data.orders.push(order);
+    notify(store, device, {
+      type: 'order',
+      title: 'Order placed',
+      body: `Your pickup code is ${order.pickupOtp}. We will tell you when it is ready.`,
+      refId: order.id,
+    });
     store.save();
     res.status(201).json(serializeOrder(order, { includeOtp: true }));
   });

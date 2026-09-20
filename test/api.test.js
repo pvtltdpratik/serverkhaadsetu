@@ -30,7 +30,8 @@ const startFakeAnalyzer = () =>
         if (analyzer.mode === 'slow') return; // never answers -> client times out
         send(201, {
           id: crypto.randomUUID(),
-          created_at: new Date().toISOString(),
+          // The real analyzer sends naive UTC: no trailing Z.
+          created_at: new Date().toISOString().replace('Z', '000'),
           health_score: 71.4,
           soil_moisture: 52.3,
           nutrient_n: 38.2,
@@ -110,6 +111,9 @@ test('soil: analyze -> history -> scan by id, matching the Flutter contract', as
   for (const key of ['id', 'created_at', 'health_score', 'soil_moisture', 'nutrient_n', 'nutrient_p', 'nutrient_k', 'disease', 'disease_confidence']) {
     assert.ok(key in scan, `missing ${key}`);
   }
+  // Naive analyzer time is normalised to explicit UTC, not shifted.
+  assert.ok(scan.created_at.endsWith('Z'));
+  assert.ok(Math.abs(Date.now() - Date.parse(scan.created_at)) < 60000);
   assert.ok(scan.recommendations.length > 0);
   assert.equal(scan.metadata.crop_type, 'tomato');
   assert.ok(scan.health_score >= 0 && scan.health_score <= 100);
@@ -208,9 +212,11 @@ test('farmer profile defaults and updates', async () => {
   assert.equal(before.json.landHoldingHectares, 0);
   const put = await call('PUT', '/v1/farmer/profile', {
     device: 'dev-p',
+    // unreadNotificationCount is derived from real notifications, so a client can't set it.
     body: { name: 'Pratik Kolhe', village: 'Shirur, Pune', landHoldingHectares: 1.5, unreadNotificationCount: 3 },
   });
   assert.equal(put.json.name, 'Pratik Kolhe');
+  assert.equal(put.json.unreadNotificationCount, 0);
   assert.equal((await call('GET', '/v1/farmer/profile', { device: 'dev-p' })).json.landHoldingHectares, 1.5);
   assert.equal((await call('PUT', '/v1/farmer/profile', { device: 'dev-p', body: { landHoldingHectares: -1 } })).status, 400);
 });
@@ -351,4 +357,82 @@ test('operator: seeded orders, walk-in sale, farmers, inventory, earnings', asyn
 test('malformed JSON is a 400, not a 500', async () => {
   const res = await fetch(`${base}/v1/community/posts`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{oops' });
   assert.equal(res.status, 400);
+});
+
+test('notifications: created by real events, listed, marked read, drive the badge count', async () => {
+  const dev = 'dev-notif';
+  const count = async () => (await call('GET', '/v1/farmer/profile', { device: dev })).json.unreadNotificationCount;
+  assert.equal(await count(), 0);
+  assert.deepEqual((await call('GET', '/v1/farmer/notifications', { device: dev })).json, []);
+
+  // 1. a scan
+  const scanRes = await call('POST', '/v1/analyze', { body: await scanForm({ device_id: dev }) });
+  assert.equal(await count(), 1);
+
+  // 2. a scheme application (a repeat apply must not notify again)
+  await call('POST', '/v1/schemes/scheme-kcc/apply', { device: dev });
+  await call('POST', '/v1/schemes/scheme-kcc/apply', { device: dev });
+  assert.equal(await count(), 2);
+
+  // 3. an order placed, made ready, collected
+  const placed = (await call('POST', '/v1/orders', { device: dev, body: { items: [{ productId: 'p-neemcake', quantity: 1 }] } })).json;
+  await call('POST', `/v1/operator/orders/${placed.id}/ready`);
+  await call('POST', `/v1/operator/orders/${placed.id}/verify-otp`, { body: { otp: placed.pickupOtp } });
+  assert.equal(await count(), 5);
+
+  const list = await call('GET', '/v1/farmer/notifications', { device: dev });
+  assert.equal(list.json.length, 5);
+  assert.equal(list.headers.get('x-total-count'), '5');
+  assert.deepEqual(list.json.map((n) => n.title), [
+    'Order collected',
+    'Your order is ready for pickup',
+    'Order placed',
+    'Application submitted',
+    'Soil scan complete',
+  ]);
+  assert.ok(list.json.every((n) => !('deviceId' in n) && n.read === false));
+  assert.equal(list.json[4].type, 'scan');
+  assert.equal(list.json[4].refId, scanRes.json.id);
+  assert.equal(list.json[3].refId, 'scheme-kcc');
+  assert.ok(list.json[1].body.includes(placed.pickupOtp));
+
+  // isolation: another device sees none of it and cannot mark it read
+  assert.deepEqual((await call('GET', '/v1/farmer/notifications', { device: 'other' })).json, []);
+  assert.equal((await call('POST', `/v1/farmer/notifications/${list.json[0].id}/read`, { device: 'other' })).status, 404);
+
+  // mark one read, filter unread, then read-all
+  const one = await call('POST', `/v1/farmer/notifications/${list.json[0].id}/read`, { device: dev });
+  assert.equal(one.json.read, true);
+  assert.equal(await count(), 4);
+  assert.equal((await call('GET', '/v1/farmer/notifications?unread=true', { device: dev })).json.length, 4);
+  assert.equal((await call('POST', '/v1/farmer/notifications/read-all', { device: dev })).json.unreadCount, 0);
+  assert.equal(await count(), 0);
+  assert.equal((await call('POST', '/v1/farmer/notifications/nope/read', { device: dev })).status, 404);
+  assert.equal((await call('GET', '/v1/farmer/notifications')).status, 400);
+
+  // operator cancel notifies too; seeded/walk-in orders (no device) notify nobody
+  const second = (await call('POST', '/v1/orders', { device: dev, body: { items: [{ productId: 'p-sprayer', quantity: 1 }] } })).json;
+  await call('POST', `/v1/operator/orders/${second.id}/cancel`);
+  const after = (await call('GET', '/v1/farmer/notifications', { device: dev })).json;
+  assert.equal(after[0].title, 'Your order was cancelled');
+  await call('POST', '/v1/operator/orders/order-1/ready');
+  assert.equal((await call('GET', '/v1/farmer/notifications', { device: dev })).json.length, after.length);
+});
+
+test('store upgrade: an older db.json without new collections is backfilled', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { createStore } = require('../src/db/store');
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'khaad-')), 'db.json');
+  createStore(file);
+  const old = JSON.parse(fs.readFileSync(file, 'utf8'));
+  delete old.notifications;
+  old.profiles.push({ deviceId: 'keep-me', name: 'Kept', village: '', landHoldingHectares: 1 });
+  fs.writeFileSync(file, JSON.stringify(old));
+
+  const upgraded = createStore(file);
+  assert.deepEqual(upgraded.data.notifications, []);
+  assert.equal(upgraded.data.profiles[0].name, 'Kept');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).notifications, []);
 });

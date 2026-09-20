@@ -19,11 +19,22 @@ const upstreamMessage = (status, payload) => {
   return `Soil analyzer rejected the request (${status})`;
 };
 
+// The analyzer sends naive UTC timestamps ("2026-09-20T16:04:24.676865", no
+// zone). Clients would read that as local time and show every scan hours off,
+// so it is turned into an explicit UTC ISO string here. Returns null if the
+// value isn't a parseable date.
+const toUtcIso = (raw) => {
+  if (typeof raw !== 'string') return null;
+  const hasZone = /(Z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  const date = new Date(hasZone ? raw : `${raw}Z`);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+};
+
 const isValidResult = (r) =>
   r &&
   typeof r.id === 'string' &&
   typeof r.disease === 'string' &&
-  typeof r.created_at === 'string' &&
+  toUtcIso(r.created_at) !== null &&
   Array.isArray(r.recommendations) &&
   NUMERIC_FIELDS.every((k) => typeof r[k] === 'number');
 
@@ -81,7 +92,7 @@ async function analyzeImage({ buffer, filename, mimetype, deviceId, cropType }) 
     console.error(`Soil analyzer returned an unexpected body: ${text.slice(0, 300)}`);
     throw new HttpError(502, 'The soil analysis service returned an unexpected response.');
   }
-  return payload;
+  return { ...payload, created_at: toUtcIso(payload.created_at) };
 }
 
 module.exports = { analyzeImage };

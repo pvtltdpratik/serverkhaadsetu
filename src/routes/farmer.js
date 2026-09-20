@@ -1,5 +1,6 @@
 const express = require('express');
-const { str, num, body, deviceId } = require('../utils/http');
+const { HttpError, str, num, body, deviceId, sendList } = require('../utils/http');
+const { unreadCount, serializeNotification } = require('../services/notifications');
 
 const RETENTION_MS = 15 * 24 * 3600 * 1000;
 const NUTRIENTS = [
@@ -8,22 +9,23 @@ const NUTRIENTS = [
   ['nutrient_k', 'Potassium', 'wood ash or well-rotted compost'],
 ];
 
-const defaultProfile = () => ({ name: 'Farmer', village: '', unreadNotificationCount: 0, landHoldingHectares: 0 });
+const defaultProfile = () => ({ name: 'Farmer', village: '', landHoldingHectares: 0 });
 
 module.exports = (store) => {
   const router = express.Router();
 
   const profileFor = (device) => store.data.profiles.find((p) => p.deviceId === device);
-  const publicProfile = (p) => ({
+  // The unread badge count is always derived from real notifications.
+  const publicProfile = (p, device) => ({
     name: p.name,
     village: p.village,
-    unreadNotificationCount: p.unreadNotificationCount,
+    unreadNotificationCount: unreadCount(store, device),
     landHoldingHectares: p.landHoldingHectares,
   });
 
   router.get('/profile', (req, res) => {
-    const p = profileFor(deviceId(req));
-    res.json(publicProfile(p || defaultProfile()));
+    const device = deviceId(req);
+    res.json(publicProfile(profileFor(device) || defaultProfile(), device));
   });
 
   router.put('/profile', (req, res) => {
@@ -35,12 +37,38 @@ module.exports = (store) => {
     if (input.landHoldingHectares !== undefined) {
       existing.landHoldingHectares = num(input.landHoldingHectares, 'landHoldingHectares', { min: 0, max: 10000 });
     }
-    if (input.unreadNotificationCount !== undefined) {
-      existing.unreadNotificationCount = num(input.unreadNotificationCount, 'unreadNotificationCount', { min: 0, max: 100000, integer: true });
-    }
     if (!profileFor(device)) store.data.profiles.push(existing);
     store.save();
-    res.json(publicProfile(existing));
+    res.json(publicProfile(existing, device));
+  });
+
+  // ---- Notifications (created by server-side events: scans, orders, applications) ----
+
+  const notificationsOf = (device) =>
+    store.data.notifications
+      .filter((n) => n.deviceId === device)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+  router.get('/notifications', (req, res) => {
+    let items = notificationsOf(deviceId(req));
+    if (req.query.unread === 'true') items = items.filter((n) => !n.read);
+    sendList(req, res, items.map(serializeNotification));
+  });
+
+  router.post('/notifications/read-all', (req, res) => {
+    const device = deviceId(req);
+    for (const n of store.data.notifications) if (n.deviceId === device) n.read = true;
+    store.save();
+    res.json({ unreadCount: 0 });
+  });
+
+  router.post('/notifications/:id/read', (req, res) => {
+    const device = deviceId(req);
+    const n = store.data.notifications.find((x) => x.id === req.params.id && x.deviceId === device);
+    if (!n) throw new HttpError(404, 'Notification not found');
+    n.read = true;
+    store.save();
+    res.json(serializeNotification(n));
   });
 
   // The single "smart recommendation" card on the home screen, derived from

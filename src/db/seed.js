@@ -186,6 +186,7 @@ const buildSeed = (now = Date.now()) => {
     products, reviews, posts, replies, schemes, farmers, inventory, restockRequests, orders,
     applications: [],
     profiles: [],
+    notifications: [],
     scans: [],
   };
 };
