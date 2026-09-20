@@ -1,0 +1,27 @@
+const crypto = require('crypto');
+const { rateLimit } = require('express-rate-limit');
+const { HttpError } = require('../utils/http');
+
+const requireApiKey = (expected) => (req, res, next) => {
+  if (!expected) return next();
+  const provided = Buffer.from(req.get('x-api-key') || '');
+  const wanted = Buffer.from(expected);
+  const ok = provided.length === wanted.length && crypto.timingSafeEqual(provided, wanted);
+  return ok ? next() : next(new HttpError(401, 'Missing or invalid API key'));
+};
+
+const limiter = (windowMs, limit, message) =>
+  rateLimit({
+    windowMs,
+    limit,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    handler: (req, res, next) => next(new HttpError(429, message)),
+  });
+
+const generalLimiter = limiter(60 * 1000, 300, 'Too many requests — please slow down');
+// Pickup OTPs are only 4 digits, so guessing has to be throttled hard.
+const otpLimiter = limiter(15 * 60 * 1000, 10, 'Too many OTP attempts — please wait a few minutes');
+const analyzeLimiter = limiter(60 * 1000, 20, 'Too many scans — please wait a moment');
+
+module.exports = { requireApiKey, generalLimiter, otpLimiter, analyzeLimiter };

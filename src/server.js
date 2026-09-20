@@ -1,8 +1,9 @@
-require('dotenv').config();
-const app = require('./app');
+const config = require('./config');
+const { createStore } = require('./db/store');
+const { createApp } = require('./app');
 
-const port = process.env.PORT || 3000;
+const app = createApp(createStore(config.dataFile));
 
-app.listen(port, () => {
-  console.log(`API server listening on port ${port}`);
+app.listen(config.port, () => {
+  console.log(`API server listening on port ${config.port}`);
 });
