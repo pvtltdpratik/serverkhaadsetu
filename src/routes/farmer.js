@@ -1,8 +1,8 @@
 const express = require('express');
-const { HttpError, str, num, body, deviceId, sendList } = require('../utils/http');
-const { unreadCount, serializeNotification } = require('../services/notifications');
+const { HttpError, asyncHandler, str, num, body, deviceId, sendPaged } = require('../utils/http');
+const { unreadCount, NOTIFICATION_COLUMNS } = require('../services/notifications');
 
-const RETENTION_MS = 15 * 24 * 3600 * 1000;
+const RETENTION_DAYS = 15;
 const NUTRIENTS = [
   ['nutrient_n', 'Nitrogen', 'vermicompost or neem cake'],
   ['nutrient_p', 'Phosphorus', 'bone meal or rock phosphate mixed with compost'],
@@ -11,75 +11,83 @@ const NUTRIENTS = [
 
 const defaultProfile = () => ({ name: 'Farmer', village: '', landHoldingHectares: 0 });
 
-module.exports = (store) => {
+module.exports = (db) => {
   const router = express.Router();
+  const ah = asyncHandler;
 
-  const profileFor = (device) => store.data.profiles.find((p) => p.deviceId === device);
+  const profileFor = async (q, owner) =>
+    (await q.query('SELECT name, village, land_holding_hectares AS "landHoldingHectares" FROM profiles WHERE owner_id = $1', [owner])).rows[0];
+
   // The unread badge count is always derived from real notifications.
-  const publicProfile = (p, device) => ({
+  const publicProfile = async (q, p, owner) => ({
     name: p.name,
     village: p.village,
-    unreadNotificationCount: unreadCount(store, device),
+    unreadNotificationCount: await unreadCount(q, owner),
     landHoldingHectares: p.landHoldingHectares,
   });
 
-  router.get('/profile', (req, res) => {
-    const device = deviceId(req);
-    res.json(publicProfile(profileFor(device) || defaultProfile(), device));
-  });
+  router.get('/profile', ah(async (req, res) => {
+    const owner = deviceId(req);
+    res.json(await publicProfile(db, (await profileFor(db, owner)) || defaultProfile(), owner));
+  }));
 
-  router.put('/profile', (req, res) => {
-    const device = deviceId(req);
+  router.put('/profile', ah(async (req, res) => {
+    const owner = deviceId(req);
     const input = body(req);
-    const existing = profileFor(device) || { deviceId: device, ...defaultProfile() };
-    if (input.name !== undefined) existing.name = str(input.name, 'name', { max: 80 });
-    if (input.village !== undefined) existing.village = str(input.village, 'village', { max: 120 });
-    if (input.landHoldingHectares !== undefined) {
-      existing.landHoldingHectares = num(input.landHoldingHectares, 'landHoldingHectares', { min: 0, max: 10000 });
-    }
-    if (!profileFor(device)) store.data.profiles.push(existing);
-    store.save();
-    res.json(publicProfile(existing, device));
-  });
+    const next = await db.tx(async (c) => {
+      // Lock so two simultaneous partial updates cannot overwrite each other.
+      await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`profile:${owner}`]);
+      const merged = { ...defaultProfile(), ...((await profileFor(c, owner)) || {}) };
+      if (input.name !== undefined) merged.name = str(input.name, 'name', { max: 80 });
+      if (input.village !== undefined) merged.village = str(input.village, 'village', { max: 120 });
+      if (input.landHoldingHectares !== undefined) {
+        merged.landHoldingHectares = num(input.landHoldingHectares, 'landHoldingHectares', { min: 0, max: 10000 });
+      }
+      await c.query(
+        `INSERT INTO profiles (owner_id, name, village, land_holding_hectares) VALUES ($1,$2,$3,$4)
+         ON CONFLICT (owner_id) DO UPDATE SET name = EXCLUDED.name, village = EXCLUDED.village, land_holding_hectares = EXCLUDED.land_holding_hectares`,
+        [owner, merged.name, merged.village, merged.landHoldingHectares],
+      );
+      return merged;
+    });
+    res.json(await publicProfile(db, next, owner));
+  }));
 
   // ---- Notifications (created by server-side events: scans, orders, applications) ----
 
-  const notificationsOf = (device) =>
-    store.data.notifications
-      .filter((n) => n.deviceId === device)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  router.get('/notifications', ah(async (req, res) => {
+    await sendPaged(req, res, db, {
+      select: NOTIFICATION_COLUMNS,
+      from: `notifications WHERE owner_id = $1${req.query.unread === 'true' ? ' AND NOT read' : ''}`,
+      params: [deviceId(req)],
+      order: 'created_at DESC, id',
+    });
+  }));
 
-  router.get('/notifications', (req, res) => {
-    let items = notificationsOf(deviceId(req));
-    if (req.query.unread === 'true') items = items.filter((n) => !n.read);
-    sendList(req, res, items.map(serializeNotification));
-  });
-
-  router.post('/notifications/read-all', (req, res) => {
-    const device = deviceId(req);
-    for (const n of store.data.notifications) if (n.deviceId === device) n.read = true;
-    store.save();
+  router.post('/notifications/read-all', ah(async (req, res) => {
+    await db.query('UPDATE notifications SET read = true WHERE owner_id = $1', [deviceId(req)]);
     res.json({ unreadCount: 0 });
-  });
+  }));
 
-  router.post('/notifications/:id/read', (req, res) => {
-    const device = deviceId(req);
-    const n = store.data.notifications.find((x) => x.id === req.params.id && x.deviceId === device);
-    if (!n) throw new HttpError(404, 'Notification not found');
-    n.read = true;
-    store.save();
-    res.json(serializeNotification(n));
-  });
+  router.post('/notifications/:id/read', ah(async (req, res) => {
+    const { rows } = await db.query(
+      `UPDATE notifications SET read = true WHERE id = $1 AND owner_id = $2 RETURNING ${NOTIFICATION_COLUMNS}`,
+      [req.params.id, deviceId(req)],
+    );
+    if (!rows.length) throw new HttpError(404, 'Notification not found');
+    res.json(rows[0]);
+  }));
 
   // The single "smart recommendation" card on the home screen, derived from
-  // the device's latest scan: dry soil > likely disease > lowest nutrient >
+  // the owner's latest scan: dry soil > likely disease > lowest nutrient >
   // healthy/harvest, with a "scan your soil" nudge when there is no scan yet.
-  router.get('/recommendation', (req, res) => {
-    const device = deviceId(req);
-    const cutoff = Date.now() - RETENTION_MS;
-    const latest = store.data.scans
-      .filter((s) => s.metadata.device_id === device && new Date(s.created_at).getTime() >= cutoff)
-      .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+  router.get('/recommendation', ah(async (req, res) => {
+    const latest = (await db.query(
+      `SELECT soil_moisture, disease, disease_confidence, nutrient_n, nutrient_p, nutrient_k, metadata
+         FROM scans WHERE owner_id = $1 AND created_at >= now() - make_interval(days => $2)
+         ORDER BY created_at DESC LIMIT 1`,
+      [deviceId(req), RETENTION_DAYS],
+    )).rows[0];
 
     if (!latest) {
       return res.json({
@@ -118,10 +126,10 @@ module.exports = (store) => {
     return res.json({
       category: 'harvest',
       title: 'Your soil is in good shape',
-      description: `Your last scan looks healthy. Keep up your routine and rescan in a couple of weeks.`,
+      description: 'Your last scan looks healthy. Keep up your routine and rescan in a couple of weeks.',
       actionLabel: 'View soil report',
     });
-  });
+  }));
 
   return router;
 };

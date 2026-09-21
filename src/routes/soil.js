@@ -5,6 +5,8 @@ const { analyzeImage } = require('../services/soilAnalyzer');
 const { analyzeLimiter } = require('../middleware/security');
 const { notify } = require('../services/notifications');
 
+const SCAN_COLUMNS = 'id, created_at, health_score, soil_moisture, nutrient_n, nutrient_p, nutrient_k, disease, disease_confidence, recommendations, metadata';
+
 const RETENTION_DAYS = 15;
 const MAX_HISTORY = 5;
 
@@ -16,16 +18,17 @@ const upload = multer({
   limits: { fileSize: 8 * 1024 * 1024, files: 1, fields: 5 },
 });
 
-module.exports = (store) => {
+module.exports = (db) => {
   const router = express.Router();
 
-  const recentScans = (device) => {
-    const cutoff = Date.now() - RETENTION_DAYS * 24 * 3600 * 1000;
-    return store.data.scans
-      .filter((s) => s.metadata.device_id === device && new Date(s.created_at).getTime() >= cutoff)
-      .sort((a, b) => b.created_at.localeCompare(a.created_at))
-      .slice(0, MAX_HISTORY);
-  };
+  // Newest MAX_HISTORY scans of the owner inside the retention window.
+  const recentScans = (q, owner) =>
+    q.query(
+      `SELECT ${SCAN_COLUMNS} FROM scans
+        WHERE owner_id = $1 AND created_at >= now() - make_interval(days => $2)
+        ORDER BY created_at DESC LIMIT $3`,
+      [owner, RETENTION_DAYS, MAX_HISTORY],
+    ).then((r) => r.rows);
 
   router.post(
     '/analyze',
@@ -70,35 +73,42 @@ module.exports = (store) => {
         metadata: { ...(result.metadata || {}), device_id: device, ...(cropType ? { crop_type: cropType } : {}) },
       };
 
-      // Prune everything past the retention window (and past the newest
-      // MAX_HISTORY for this device) so the db doesn't grow forever.
-      const cutoff = Date.now() - RETENTION_DAYS * 24 * 3600 * 1000;
-      store.data.scans = store.data.scans.filter((s) => new Date(s.created_at).getTime() >= cutoff);
-      store.data.scans.push(scan);
-      notify(store, device, {
-        type: 'scan',
-        title: 'Soil scan complete',
-        body: `Your soil health score is ${Math.round(scan.health_score)}/100. Tap to see the full report.`,
-        refId: scan.id,
+      await db.tx(async (c) => {
+        await c.query(
+          `INSERT INTO scans (id, owner_id, created_at, health_score, soil_moisture, nutrient_n, nutrient_p, nutrient_k, disease, disease_confidence, recommendations, metadata)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+          [scan.id, device, scan.created_at, scan.health_score, scan.soil_moisture, scan.nutrient_n, scan.nutrient_p, scan.nutrient_k,
+            scan.disease, scan.disease_confidence, scan.recommendations, JSON.stringify(scan.metadata)],
+        );
+        await notify(c, device, {
+          type: 'scan',
+          title: 'Soil scan complete',
+          body: `Your soil health score is ${Math.round(scan.health_score)}/100. Tap to see the full report.`,
+          refId: scan.id,
+        });
+        // Prune everything past the retention window, and everything past the
+        // newest MAX_HISTORY for this owner, so the table does not grow forever.
+        await c.query("DELETE FROM scans WHERE created_at < now() - make_interval(days => $1)", [RETENTION_DAYS]);
+        await c.query(
+          `DELETE FROM scans WHERE owner_id = $1 AND id NOT IN (
+             SELECT id FROM scans WHERE owner_id = $1 ORDER BY created_at DESC LIMIT $2)`,
+          [device, MAX_HISTORY],
+        );
       });
-      const keep = new Set(recentScans(device).map((s) => s.id));
-      store.data.scans = store.data.scans.filter((s) => s.metadata.device_id !== device || keep.has(s.id));
-      store.save();
 
       res.json(scan);
     }),
   );
 
-  router.get('/history', (req, res) => {
-    res.json(recentScans(deviceId(req)));
-  });
+  router.get('/history', asyncHandler(async (req, res) => {
+    res.json(await recentScans(db, deviceId(req)));
+  }));
 
-  router.get('/scan/:id', (req, res) => {
-    const device = deviceId(req);
-    const scan = recentScans(device).find((s) => s.id === req.params.id);
+  router.get('/scan/:id', asyncHandler(async (req, res) => {
+    const scan = (await recentScans(db, deviceId(req))).find((s) => s.id === req.params.id);
     if (!scan) throw new HttpError(404, 'Scan not found');
     res.json(scan);
-  });
+  }));
 
   return router;
 };

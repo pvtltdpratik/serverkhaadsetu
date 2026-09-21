@@ -66,4 +66,26 @@ const sendList = (req, res, items) => {
   res.json(slice);
 };
 
-module.exports = { HttpError, asyncHandler, str, num, oneOf, body, deviceId, sendList };
+const paging = (req) => ({
+  limit: req.query.limit === undefined ? 100 : num(req.query.limit, 'limit', { min: 1, max: 200, integer: true }),
+  offset: req.query.offset === undefined ? 0 : num(req.query.offset, 'offset', { min: 0, integer: true }),
+});
+
+// Paginates in SQL. `from` is everything after FROM (joins + WHERE) and uses
+// $1..$n for `params`; the total goes in X-Total-Count. `finish` (may be async)
+// turns the page of rows into the response body.
+const sendPaged = async (req, res, db, { select, from, params = [], order, finish = (rows) => rows }) => {
+  const { limit, offset } = paging(req);
+  const total = (await db.one(`SELECT count(*)::int AS n FROM ${from}`, params)).n;
+  const rows = await db.rows(
+    `SELECT ${select} FROM ${from} ORDER BY ${order} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    [...params, limit, offset],
+  );
+  res.set('X-Total-Count', String(total));
+  res.json(await finish(rows));
+};
+
+// Escapes LIKE wildcards so a search for "50%" matches the text, not everything.
+const likePattern = (text) => `%${String(text).replace(/[\\%_]/g, '\\$&')}%`;
+
+module.exports = { HttpError, asyncHandler, str, num, oneOf, body, deviceId, sendList, sendPaged, likePattern };

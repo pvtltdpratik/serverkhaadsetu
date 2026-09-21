@@ -191,4 +191,63 @@ const buildSeed = (now = Date.now()) => {
   };
 };
 
-module.exports = { buildSeed };
+// Loads the starter data into an empty database (first run only). Existing
+// installs — anything with a product already — are left untouched.
+const seedIfEmpty = async (db) => {
+  await db.tx(async (c) => {
+    // Serialise concurrent first starts of several instances.
+    await c.query('SELECT pg_advisory_xact_lock(727202)');
+    const { rows } = await c.query('SELECT 1 FROM products LIMIT 1');
+    if (rows.length) return;
+    const d = buildSeed();
+
+    for (const p of d.products) {
+      await c.query(
+        `INSERT INTO products (id, name, brand, category, price_in_rupees, unit_label, rating, review_count, description, nutrient_focus, npk_percentages)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [p.id, p.name, p.brand, p.category, p.priceInRupees, p.unitLabel, p.rating, p.reviewCount, p.description, p.nutrientFocus, JSON.stringify(p.npkPercentages)],
+      );
+    }
+    for (const r of d.reviews) {
+      await c.query('INSERT INTO reviews (id, product_id, author_name, rating, comment, date) VALUES ($1,$2,$3,$4,$5,$6)',
+        [r.id, r.productId, r.authorName, r.rating, r.comment, r.date]);
+    }
+    for (const p of d.posts) {
+      await c.query('INSERT INTO posts (id, author_name, title, body, crop, district, problem_type, created_at, like_count) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+        [p.id, p.authorName, p.title, p.body, p.crop, p.district, p.problemType, p.createdAt, p.likeCount]);
+    }
+    for (const r of d.replies) {
+      await c.query('INSERT INTO replies (id, post_id, author_name, body, created_at) VALUES ($1,$2,$3,$4,$5)',
+        [r.id, r.postId, r.authorName, r.body, r.createdAt]);
+    }
+    for (const s of d.schemes) {
+      await c.query(
+        `INSERT INTO schemes (id, name, agency, category, description, benefit, eligibility_criteria, max_land_holding_hectares, application_deadline)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [s.id, s.name, s.agency, s.category, s.description, s.benefit, s.eligibilityCriteria, s.maxLandHoldingHectares, s.applicationDeadline],
+      );
+    }
+    for (const f of d.farmers) {
+      await c.query('INSERT INTO farmers (id, name, village, phone, active_crop, last_visit_date, needs_follow_up, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+        [f.id, f.name, f.village, f.phone, f.activeCrop, f.lastVisitDate, f.needsFollowUp, f.notes]);
+    }
+    for (const i of d.inventory) {
+      await c.query('INSERT INTO inventory_items (id, name, unit, unit_price, current_stock, low_stock_threshold) VALUES ($1,$2,$3,$4,$5,$6)',
+        [i.id, i.name, i.unit, i.unitPrice, i.currentStock, i.lowStockThreshold]);
+    }
+    for (const r of d.restockRequests) {
+      await c.query('INSERT INTO restock_requests (id, item_id, item_name, requested_quantity, status, requested_date) VALUES ($1,$2,$3,$4,$5,$6)',
+        [r.id, r.itemId, r.itemName, r.requestedQuantity, r.status, r.requestedDate]);
+    }
+    for (const o of d.orders) {
+      await c.query('INSERT INTO orders (id, customer_name, type, status, created_at, pickup_otp, owner_id) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+        [o.id, o.customerName, o.type, o.status, o.createdAt, o.pickupOtp, o.deviceId]);
+      for (const [i, item] of o.items.entries()) {
+        await c.query('INSERT INTO order_items (order_id, position, product_name, quantity, unit_price) VALUES ($1,$2,$3,$4,$5)',
+          [o.id, i, item.productName, item.quantity, item.unitPrice]);
+      }
+    }
+  });
+};
+
+module.exports = { buildSeed, seedIfEmpty };

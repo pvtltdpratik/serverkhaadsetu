@@ -19,7 +19,7 @@ const operatorRouter = require('./routes/operator');
 
 // `options.auth` lets tests inject their own key set; production reads
 // SUPABASE_URL from the environment.
-const createApp = (store, options = {}) => {
+const createApp = (db, options = {}) => {
   const auth = createAuth(options.auth || { supabaseUrl: config.supabaseUrl });
   const app = express();
 
@@ -36,13 +36,13 @@ const createApp = (store, options = {}) => {
   v1.use(generalLimiter);
   v1.use(requireApiKey(config.apiKey));
   v1.use(auth.middleware);
-  v1.use(soilRouter(store)); // POST /analyze, GET /history, GET /scan/:id
-  v1.use('/weather', weatherRouter(store));
-  v1.use('/farmer', farmerRouter(store));
-  v1.use(marketplaceRouter(store)); // /products..., /orders...
-  v1.use('/community', communityRouter(store));
-  v1.use('/schemes', schemesRouter(store));
-  v1.use('/operator', operatorRouter(store));
+  v1.use(soilRouter(db)); // POST /analyze, GET /history, GET /scan/:id
+  v1.use('/weather', weatherRouter(db));
+  v1.use('/farmer', farmerRouter(db));
+  v1.use(marketplaceRouter(db)); // /products..., /orders...
+  v1.use('/community', communityRouter(db));
+  v1.use('/schemes', schemesRouter(db));
+  v1.use('/operator', operatorRouter(db));
   app.use('/v1', v1);
 
   app.use(notFound);

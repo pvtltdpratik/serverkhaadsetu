@@ -6,6 +6,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "migrate": "node scripts/migrate.js",
     "dev": "node --watch src/server.js",
     "test": "node --test \"test/**/*.test.js\""
   },
@@ -20,6 +21,7 @@
     "helmet": "^7.1.0",
     "jose": "^5.10.0",
     "morgan": "^1.10.0",
-    "multer": "^2.4.0"
+    "multer": "^2.4.0",
+    "pg": "^8.23.0"
   }
 }

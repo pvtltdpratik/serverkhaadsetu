@@ -4,12 +4,20 @@ Express API for the KHAAD Setu Flutter app (farmer app + village-center/operator
 
 ```bash
 npm install
-cp .env.example .env
-npm run dev      # http://localhost:3000
-npm test
+cp .env.example .env     # then set DATABASE_URL to your Postgres
+npm run dev              # http://localhost:3000 (creates the tables on first start)
+npm test                 # needs TEST_DATABASE_URL, see below
 ```
 
-Requires Node 20+. Data is persisted to `DATA_FILE` (default `./data/db.json`) and seeded on first run with the same starter data the app used to fake locally.
+Requires Node 20+ and PostgreSQL 13+.
+
+## Database
+
+Data lives in PostgreSQL (`DATABASE_URL`; add `DATABASE_SSL=true` for managed hosts that need TLS). The schema is plain SQL in `migrations/`, applied in filename order on every start (or on demand with `npm run migrate`); applied files are recorded in `schema_migrations`, and concurrent instances are serialised with an advisory lock. An empty database is seeded once with the starter data. To change the schema, add a new numbered file (`002_….sql`) — never edit one that has been applied.
+
+Farmer-side rows (`profiles`, `scans`, `orders`, `notifications`, `scheme_applications`, `post_likes`) carry an `owner_id`: the Supabase user id, or the anonymous device id when authentication is off. It is deliberately not a foreign key; accounts live in Supabase.
+
+Tests run against a real Postgres. Point `TEST_DATABASE_URL` at a throwaway database (default `postgres://postgres@localhost:5432/khaad_test`); each test file creates and drops its own schema inside it.
 
 ## Conventions
 
@@ -85,10 +93,10 @@ Scans are forwarded to the external Soil Sense analyzer at `SOIL_ANALYZER_URL` (
 
 - Install Node 20+: `sudo dnf install -y nodejs20`.
 - Set `SOIL_ANALYZER_URL` to wherever the analyzer runs. `localhost:8000` only works if it runs on the same EC2 machine; otherwise use its private/public address and open the port in the security group.
-- Set `PORT`, `API_KEY` and `DATA_FILE` (e.g. `/var/lib/khaadsetu/db.json`, owned by `ec2-user`) as `Environment=` lines in the systemd unit.
+- Set `PORT`, `API_KEY`, `DATABASE_URL` (+ `DATABASE_SSL=true` for RDS) and `SUPABASE_URL` as `Environment=` lines in the systemd unit. Keep the database password out of the repo.
 - **Nginx must allow photo uploads** — its default body limit is 1 MB. Add `client_max_body_size 10m;` inside the `server { }` block.
-- The JSON store is single-process. Run one instance; move to Postgres/DynamoDB behind `src/db/store.js` before scaling out.
+- State lives in Postgres, so several instances can run behind the load balancer. Migrations take an advisory lock, so they are safe to run on every instance's start.
 
 ## Not built yet
 
-There is no farmer/operator login: farmers are identified by device id and the operator API is protected only by the shared `API_KEY`. Add real auth (e.g. phone-OTP login) before exposing this publicly with real user data.
+Farmers sign in through Supabase (see `API.md`), but there are no farmer/operator roles yet: any signed-in user can call the operator API. Add roles before exposing the operator endpoints publicly with real data.

@@ -12,6 +12,7 @@ const ISSUER = `${SUPABASE}/auth/v1`;
 
 let server;
 let base;
+let db;
 let analyzer;
 let signingKey;
 let strangerKey;
@@ -61,16 +62,18 @@ test.before(async () => {
   await new Promise((r) => analyzer.listen(0, r));
   process.env.SOIL_ANALYZER_URL = `http://127.0.0.1:${analyzer.address().port}/v1/analyze`;
 
-  const { createStore } = require('../src/db/store');
+  const { openTestDb } = require('./helpers');
   const { createApp } = require('../src/app');
-  const app = createApp(createStore(null), { auth: { supabaseUrl: SUPABASE, jwks: createLocalJWKSet({ keys: [jwk] }) } });
+  db = await openTestDb('t_auth');
+  const app = createApp(db, { auth: { supabaseUrl: SUPABASE, jwks: createLocalJWKSet({ keys: [jwk] }) } });
   await new Promise((r) => { server = app.listen(0, r); });
   base = `http://127.0.0.1:${server.address().port}`;
 });
 
-test.after(() => {
+test.after(async () => {
   server.close();
   analyzer.close();
+  await require('./helpers').closeTestDb(db);
 });
 
 test('health stays open, everything under /v1 needs a token', async () => {

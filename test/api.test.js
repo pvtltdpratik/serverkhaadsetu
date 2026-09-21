@@ -10,6 +10,7 @@ const crypto = require('crypto');
 let server;
 let base;
 let config;
+let db;
 
 // Stand-in for the external Soil Sense service. `analyzer.mode` picks the
 // behaviour; `analyzer.lastRequest` records what was forwarded to it.
@@ -52,19 +53,21 @@ const startFakeAnalyzer = () =>
 test.before(async () => {
   const analyzerPort = await startFakeAnalyzer();
   process.env.SOIL_ANALYZER_URL = `http://127.0.0.1:${analyzerPort}/v1/analyze`;
-  const { createStore } = require('../src/db/store');
+  const { openTestDb } = require('./helpers');
   const { createApp } = require('../src/app');
   config = require('../src/config');
-  const app = createApp(createStore(null));
+  db = await openTestDb('t_api');
+  const app = createApp(db);
   await new Promise((resolve) => {
     server = app.listen(0, resolve);
   });
   base = `http://127.0.0.1:${server.address().port}`;
 });
 
-test.after(() => {
+test.after(async () => {
   server.close();
   analyzer.server.close();
+  await require('./helpers').closeTestDb(db);
 });
 
 const call = async (method, path, { body, device, headers = {} } = {}) => {
@@ -421,20 +424,62 @@ test('notifications: created by real events, listed, marked read, drive the badg
   assert.equal((await call('GET', '/v1/farmer/notifications', { device: dev })).json.length, after.length);
 });
 
-test('store upgrade: an older db.json without new collections is backfilled', () => {
-  const fs = require('fs');
-  const os = require('os');
-  const path = require('path');
-  const { createStore } = require('../src/db/store');
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'khaad-')), 'db.json');
-  createStore(file);
-  const old = JSON.parse(fs.readFileSync(file, 'utf8'));
-  delete old.notifications;
-  old.profiles.push({ deviceId: 'keep-me', name: 'Kept', village: '', landHoldingHectares: 1 });
-  fs.writeFileSync(file, JSON.stringify(old));
+test('migrations are idempotent and the starter data is only loaded once', async () => {
+  const { openTestDb, closeTestDb } = require('./helpers');
+  const { seedIfEmpty } = require('../src/db/seed');
+  const fresh = await openTestDb('t_migrate');
+  try {
+    await fresh.query("UPDATE products SET name = 'Edited' WHERE id = 'p-neemcake'");
+    await fresh.migrate(); // second run: nothing to apply
+    await seedIfEmpty(fresh); // second run: table is not empty, so nothing is re-inserted
+    assert.equal((await fresh.one("SELECT name FROM products WHERE id = 'p-neemcake'")).name, 'Edited');
+    assert.equal((await fresh.one('SELECT count(*)::int AS n FROM products')).n, 5);
+    assert.equal((await fresh.one('SELECT count(*)::int AS n FROM schema_migrations')).n, 1);
+  } finally {
+    await closeTestDb(fresh);
+  }
+});
 
-  const upgraded = createStore(file);
-  assert.deepEqual(upgraded.data.notifications, []);
-  assert.equal(upgraded.data.profiles[0].name, 'Kept');
-  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).notifications, []);
+test('search text is matched literally, not as LIKE wildcards', async () => {
+  const all = (await call('GET', '/v1/products')).json.length;
+  assert.ok(all > 1);
+  // "%" would match every product if it were treated as a wildcard.
+  assert.equal((await call('GET', '/v1/products?q=%25')).json.length, 0);
+  assert.equal((await call('GET', '/v1/products?q=_')).json.length, 0);
+});
+
+test('X-Total-Count and paging come from SQL, and stay consistent with filters', async () => {
+  const res = await fetch(base + '/v1/products?limit=2&offset=1');
+  assert.equal(res.headers.get('x-total-count'), '5');
+  assert.equal((await res.json()).length, 2);
+});
+
+test('concurrent requests cannot corrupt counters or double-apply', async () => {
+  const before = (await call('GET', '/v1/community/posts/post-2')).json.likeCount;
+
+  // 12 different devices like at once: the counter must land exactly +12.
+  await Promise.all(Array.from({ length: 12 }, (_, i) => call('POST', '/v1/community/posts/post-2/like', { device: `race-${i}` })));
+  // The same device liking 8 times at once still counts once.
+  await Promise.all(Array.from({ length: 8 }, () => call('POST', '/v1/community/posts/post-2/like', { device: 'race-same' })));
+  assert.equal((await call('GET', '/v1/community/posts/post-2')).json.likeCount, before + 13);
+
+  // Double-tapping "apply" submits one application and one notification.
+  const results = await Promise.all(Array.from({ length: 6 }, () => call('POST', '/v1/schemes/scheme-kcc/apply', { device: 'race-apply' })));
+  assert.equal(results.filter((r) => r.status === 201).length, 1);
+  assert.equal(results.filter((r) => r.status === 200).length, 5);
+  const notes = (await call('GET', '/v1/farmer/notifications', { device: 'race-apply' })).json;
+  assert.equal(notes.filter((n) => n.type === 'scheme').length, 1);
+
+  // Ten simultaneous reviews all count toward the product's review total.
+  const start = (await call('GET', '/v1/products/p-neemcake')).json.reviewCount;
+  await Promise.all(Array.from({ length: 10 }, () =>
+    call('POST', '/v1/products/p-neemcake/reviews', { body: { authorName: 'R', rating: 5, comment: 'ok' } })));
+  assert.equal((await call('GET', '/v1/products/p-neemcake')).json.reviewCount, start + 10);
+});
+
+test('catalog lists keep their curated order, not alphabetical id order', async () => {
+  const names = (await call('GET', '/v1/products')).json.map((p) => p.name);
+  assert.equal(names[0], 'Vermicompost');
+  assert.equal(names[1], 'Neem Cake');
+  assert.equal((await call('GET', '/v1/operator/inventory/items')).json[0].name, 'Vermicompost');
 });
