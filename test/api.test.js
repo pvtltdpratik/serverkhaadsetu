@@ -1,4 +1,6 @@
 process.env.NODE_ENV = 'test';
+// These tests cover the anonymous X-Device-Id mode; auth has its own file.
+process.env.SUPABASE_URL = '';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

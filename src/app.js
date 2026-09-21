@@ -6,6 +6,7 @@ const morgan = require('morgan');
 const config = require('./config');
 const { requireApiKey, generalLimiter } = require('./middleware/security');
 const { notFound, errorHandler } = require('./middleware/errors');
+const { createAuth } = require('./middleware/auth');
 
 const healthRouter = require('./routes/health');
 const soilRouter = require('./routes/soil');
@@ -16,7 +17,10 @@ const communityRouter = require('./routes/community');
 const schemesRouter = require('./routes/schemes');
 const operatorRouter = require('./routes/operator');
 
-const createApp = (store) => {
+// `options.auth` lets tests inject their own key set; production reads
+// SUPABASE_URL from the environment.
+const createApp = (store, options = {}) => {
+  const auth = createAuth(options.auth || { supabaseUrl: config.supabaseUrl });
   const app = express();
 
   // Behind Nginx on EC2: trust one proxy hop so rate limiting sees real client IPs.
@@ -31,6 +35,7 @@ const createApp = (store) => {
   const v1 = express.Router();
   v1.use(generalLimiter);
   v1.use(requireApiKey(config.apiKey));
+  v1.use(auth.middleware);
   v1.use(soilRouter(store)); // POST /analyze, GET /history, GET /scan/:id
   v1.use('/weather', weatherRouter(store));
   v1.use('/farmer', farmerRouter(store));

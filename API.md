@@ -7,12 +7,28 @@ Everything below is under `/v1`, except `GET /health`.
 
 ## 1. Conventions
 
+### Authentication (Supabase)
+
+Users sign in with Supabase Auth in the app. When the server has `SUPABASE_URL` set, **every `/v1` call** must send the user's access token:
+
+```
+Authorization: Bearer <supabase access token>
+```
+
+- The server verifies the token's signature against the project's public keys (`<SUPABASE_URL>/auth/v1/.well-known/jwks.json`, cached), its issuer, its `authenticated` audience and its expiry. It never calls Supabase per request and holds no secret.
+- The token's `sub` (the Supabase user id) becomes the owner of all farmer-side data: profile, scans, orders, notifications, likes, scheme applications. **`X-Device-Id` / `device_id` are ignored** in this mode, and the `device_id` inside a scan's `metadata_json` is overridden, so one user cannot read or write another's data by naming them.
+- Missing, malformed, forged or wrong-project tokens -> `401 {"error":"Please sign in to continue"}` / `"Invalid sign-in token"`. Expired -> `401 "Your session has expired. Please sign in again."` (the app refreshes the session and retries).
+- `GET /health` stays open.
+- With `SUPABASE_URL` empty (local development, tests) authentication is off and the API uses the anonymous `X-Device-Id` described below.
+- Data created before this change was keyed by device id and is not visible to accounts.
+- Operator endpoints only require a valid login; there are no roles yet.
+
 ### Headers
 
 | Header | When | Notes |
 |---|---|---|
 | `Content-Type: application/json` | every request with a JSON body | not needed for the multipart soil upload |
-| `X-Device-Id: <string>` | every **farmer-side** call marked "device" below | your existing `deviceIdProvider` value. Alternative: `?device_id=<id>` query param. Missing -> `400` |
+| `X-Device-Id: <string>` | every **farmer-side** call marked "device" below, **only when authentication is off** | your existing `deviceIdProvider` value. Alternative: `?device_id=<id>` query param. Missing -> `400` |
 | `X-API-Key: <string>` | every `/v1` call, **only if** the server has `API_KEY` set | missing/wrong -> `401` |
 
 Operator endpoints (`/v1/operator/*`) are global to the village center and do **not** need a device id.

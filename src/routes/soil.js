@@ -45,7 +45,8 @@ module.exports = (store) => {
       }
       // The plant type may also arrive as plain `device_id` / `crop_type`
       // (or `plant_type`) form fields; metadata_json wins when both are given.
-      const device = str(metadata.device_id ?? req.body.device_id ?? req.get('x-device-id'), 'metadata_json.device_id', { max: 100 });
+      // With auth on, the owner is always the verified user, whatever the client claims.
+      const device = req.userId ?? str(metadata.device_id ?? req.body.device_id ?? req.get('x-device-id'), 'metadata_json.device_id', { max: 100 });
       const cropType = str(metadata.crop_type ?? req.body.crop_type ?? req.body.plant_type, 'metadata_json.crop_type', { max: 50, optional: true });
 
       const result = await analyzeImage({

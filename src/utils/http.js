@@ -44,7 +44,12 @@ const body = (req) => {
   return req.body;
 };
 
+// Who owns farmer-side data. With authentication on, it is the verified
+// Supabase user id — the client-supplied device id is ignored so nobody can
+// read or write another account's data by naming it. With authentication off
+// (local development) it falls back to the anonymous device id.
 const deviceId = (req) => {
+  if (req.userId) return req.userId;
   const raw = req.get('x-device-id') || req.query.device_id;
   return str(raw, 'X-Device-Id header (or device_id query param)', { max: 100 });
 };

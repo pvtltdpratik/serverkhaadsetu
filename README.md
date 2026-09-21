@@ -18,6 +18,7 @@ Requires Node 20+. Data is persisted to `DATA_FILE` (default `./data/db.json`) a
 - Errors: `{ "error": "message" }` with a meaningful status (400 validation, 401 key, 404, 409 wrong state, 413/422 bad upload, 429 rate limit).
 - Lists return a plain JSON array, with `X-Total-Count` and optional `?limit=&offset=`.
 - Farmer data is scoped per device: send `X-Device-Id: <id>` (or `?device_id=`). The operator API is global to the village center.
+- Auth: set `SUPABASE_URL` and every `/v1` call needs `Authorization: Bearer <Supabase access token>`; data is then owned by the token's user id (see `API.md`). Unset = anonymous `X-Device-Id` mode for local development.
 - If `API_KEY` is set, every `/v1` call needs `X-API-Key`.
 
 ## Endpoints

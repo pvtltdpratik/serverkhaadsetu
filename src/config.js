@@ -10,6 +10,10 @@ module.exports = {
   // disable scanning (the API then answers 503).
   soilAnalyzerUrl: process.env.SOIL_ANALYZER_URL ?? 'http://localhost:8000/v1/analyze',
   soilAnalyzerTimeoutMs: Number(process.env.SOIL_ANALYZER_TIMEOUT_MS) || 25000,
+  // Supabase project URL, e.g. https://xxxx.supabase.co. When set, every /v1
+  // call must carry a valid Supabase access token and data is owned by the
+  // token's user id. Empty = authentication off (anonymous X-Device-Id).
+  supabaseUrl: process.env.SUPABASE_URL || '',
   commissionRatePercent: Number(process.env.COMMISSION_RATE_PERCENT) || 5,
   corsOrigin: process.env.CORS_ORIGIN || '*',
 };
