@@ -8,6 +8,9 @@ module.exports = {
   databaseUrl: process.env.DATABASE_URL || '',
   // Set DATABASE_SSL=true for managed Postgres that requires TLS (RDS, Supabase, ...).
   databaseSsl: process.env.DATABASE_SSL === 'true',
+  // The database every Postgres server already has, used to create
+  // DATABASE_URL's database if it does not exist yet (see src/db/bootstrap.js).
+  databaseBootstrapDb: process.env.DATABASE_BOOTSTRAP_DB || 'postgres',
   // Full URL of the Soil Sense analyze endpoint. Set it to an empty value to
   // disable scanning (the API then answers 503).
   soilAnalyzerUrl: process.env.SOIL_ANALYZER_URL ?? 'http://localhost:8000/v1/analyze',

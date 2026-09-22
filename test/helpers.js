@@ -1,3 +1,4 @@
+const { ensureDatabaseExists } = require('../src/db/bootstrap');
 const { createDb } = require('../src/db/database');
 const { seedIfEmpty } = require('../src/db/seed');
 
@@ -10,6 +11,7 @@ const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL || 'postgres://postgres@
 const openTestDb = async (schema, { seed = true } = {}) => {
   const db = createDb({ url: TEST_DATABASE_URL, schema });
   try {
+    await ensureDatabaseExists(TEST_DATABASE_URL);
     await db.dropSchema();
     await db.migrate();
     if (seed) await seedIfEmpty(db);

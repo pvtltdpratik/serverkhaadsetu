@@ -13,7 +13,9 @@ Requires Node 20+ and PostgreSQL 13+.
 
 ## Database
 
-Data lives in PostgreSQL (`DATABASE_URL`; add `DATABASE_SSL=true` for managed hosts that need TLS). The schema is plain SQL in `migrations/`, applied in filename order on every start (or on demand with `npm run migrate`); applied files are recorded in `schema_migrations`, and concurrent instances are serialised with an advisory lock. An empty database is seeded once with the starter data. To change the schema, add a new numbered file (`002_….sql`) — never edit one that has been applied.
+Data lives in PostgreSQL (`DATABASE_URL`; add `DATABASE_SSL=true` for managed hosts that need TLS, RDS included). `DATABASE_URL` must be the full connection string — `postgres://<user>:<password>@<host>:<port>/<database>` — not just the RDS endpoint by itself.
+
+A fresh RDS instance only has its built-in `postgres` maintenance database; it does not have `khaadsetu` (or whatever you name yours) until something creates it. On every start, the server first opens a *separate* connection to that maintenance database (`DATABASE_BOOTSTRAP_DB`, default `postgres`) to check whether `DATABASE_URL`'s database exists yet and creates it there if not — this is unavoidable in Postgres, which has no `CREATE DATABASE IF NOT EXISTS` and no way to switch databases on one connection (see `src/db/bootstrap.js`). Once the database exists, the schema is plain SQL in `migrations/`, applied in filename order on every start (or on demand with `npm run migrate`); applied files are recorded in `schema_migrations`, and concurrent instances are serialised with an advisory lock. An empty database is seeded once with the starter data. To change the schema, add a new numbered file (`002_….sql`) — never edit one that has been applied.
 
 Farmer-side rows (`profiles`, `scans`, `orders`, `notifications`, `scheme_applications`, `post_likes`) carry an `owner_id`: the Supabase user id, or the anonymous device id when authentication is off. It is deliberately not a foreign key; accounts live in Supabase.
 

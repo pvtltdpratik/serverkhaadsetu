@@ -1,13 +1,15 @@
 const config = require('./config');
+const { ensureDatabaseExists } = require('./db/bootstrap');
 const { createDb } = require('./db/database');
 const { seedIfEmpty } = require('./db/seed');
 const { createApp } = require('./app');
 
 const main = async () => {
   if (!config.databaseUrl) {
-    console.error('DATABASE_URL is not set. Point it at a Postgres database, e.g. postgres://user:pass@localhost:5432/khaad_setu');
+    console.error('DATABASE_URL is not set. Point it at a Postgres database, e.g. postgres://user:pass@localhost:5432/khaadsetu');
     process.exit(1);
   }
+  await ensureDatabaseExists(config.databaseUrl, { ssl: config.databaseSsl, bootstrapDb: config.databaseBootstrapDb });
   const db = createDb({ url: config.databaseUrl, ssl: config.databaseSsl });
   await db.migrate();
   await seedIfEmpty(db);
