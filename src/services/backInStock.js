@@ -1,4 +1,5 @@
 const { haversineKm, boundingBox } = require('./geo');
+const { LOT_LIVE } = require('./surplus');
 const { notify } = require('./notifications');
 
 // How far from a subscriber a center can be and still count as "near them".
@@ -58,4 +59,48 @@ const notifyBackInStock = async (db, { centerId, productId }) => {
   });
 };
 
-module.exports = { subscribe, unsubscribe, isSubscribed, notifyBackInStock, NOTIFY_RADIUS_KM };
+const CONDITION_WORDS = {
+  near_expiry: 'near its expiry date',
+  opened: 'an opened pack',
+  returned: 'returned stock',
+  damaged_packaging: 'in damaged packaging',
+  other: 'surplus stock',
+};
+
+// Called after an operator lists a surplus lot: tells the farmers who asked to
+// hear about this product and are within range of the center. Unlike back in
+// stock it does NOT end their subscription, because they still want the
+// regular product; and it runs once per lot, so nobody hears about it twice.
+// Returns how many farmers were told.
+const notifyNewSurplus = async (db, { lotId }) => {
+  const { rows: [lot] } = await db.query(
+    `SELECT l.id, l.product_id AS "productId", l.unit_price AS "price", l.condition, l.quantity - l.reserved AS available,
+            p.name AS "productName", p.price_in_rupees AS "catalogPrice", ce.name, ce.village, ce.latitude, ce.longitude
+       FROM surplus_lot l JOIN products p ON p.id = l.product_id JOIN village_center ce ON ce.center_id = l.center_id
+      WHERE l.id = $1 AND ${LOT_LIVE} AND ce.status = 'active' AND ce.operator_id IS NOT NULL`,
+    [lotId],
+  );
+  if (!lot) return 0;
+  const box = boundingBox(lot, NOTIFY_RADIUS_KM);
+  const { rows: subs } = await db.query(
+    `SELECT owner_id AS "ownerId", latitude, longitude FROM stock_subscription
+      WHERE product_id = $1 AND latitude BETWEEN $2 AND $3 AND longitude BETWEEN $4 AND $5`,
+    [lot.productId, box.minLat, box.maxLat, box.minLng, box.maxLng],
+  );
+  const off = Number(lot.catalogPrice) > 0 ? Math.round((1 - Number(lot.price) / Number(lot.catalogPrice)) * 100) : 0;
+  let told = 0;
+  for (const s of subs) {
+    const km = haversineKm(lot, s);
+    if (km > NOTIFY_RADIUS_KM) continue;
+    await notify(db, s.ownerId, {
+      type: 'stock',
+      title: `${lot.productName} is ${off}% off near you`,
+      body: `${lot.name}, ${lot.village} (${Math.round(km * 10) / 10} km away) has ${lot.available} at Rs ${Number(lot.price)} instead of Rs ${Number(lot.catalogPrice)}. It is ${CONDITION_WORDS[lot.condition] || 'surplus stock'}.`,
+      refId: lot.productId,
+    });
+    told += 1;
+  }
+  return told;
+};
+
+module.exports = { subscribe, unsubscribe, isSubscribed, notifyBackInStock, notifyNewSurplus, NOTIFY_RADIUS_KM };

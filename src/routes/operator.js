@@ -8,7 +8,7 @@ const centers = require('../services/centerService');
 const surplus = require('../services/surplus');
 const { deductWalkIn, deductWalkInLots, consumeOrderStock } = require('../services/reservations');
 const { checkLowStock } = require('../services/stockAlerts');
-const { notifyBackInStock } = require('../services/backInStock');
+const { notifyBackInStock, notifyNewSurplus } = require('../services/backInStock');
 const config = require('../config');
 
 const ORDER_STATUSES = ['pending', 'readyForPickup', 'completed', 'cancelled'];
@@ -340,6 +340,8 @@ module.exports = (db, roles) => {
       note: str(input.note, 'note', { max: 300, optional: true }),
       fromShelf: input.fromShelf === undefined ? false : bool(input.fromShelf, 'fromShelf'),
     });
+    // Best effort, after the lot is safely recorded: a failure here must not fail the listing.
+    notifyNewSurplus(db, { lotId: lot.id }).catch((err) => console.error('Surplus alerts failed:', err.message));
     res.status(201).json(lot);
   }));
 

@@ -446,3 +446,57 @@ test('walk-in: a counter sale and an online reservation racing for the last unit
   const after = await lotOf(c, lot.id);
   assert.ok(after.quantity - after.reserved >= 0);
 });
+
+const subscribe = (device, productId, latitude = 18.5, longitude = 74.0) =>
+  call('PUT', `/v1/products/${productId}/notify-me`, { device, body: { latitude, longitude } });
+const dealAlerts = async (device) => (await call('GET', '/v1/farmer/notifications', { device })).json.filter((n) => / off near you$/.test(n.title));
+// The alert goes out just after the listing responds, so wait for it briefly.
+const waitForAlerts = async (device, count) => {
+  for (let i = 0; i < 50; i += 1) {
+    const alerts = await dealAlerts(device);
+    if (alerts.length >= count) return alerts;
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  return dealAlerts(device);
+};
+
+test('deal alerts: a farmer who asked to hear about a product is told when a deal on it appears near them, and stays subscribed', async () => {
+  const c = await makeCenter('deal', 0.02);
+  assert.equal((await subscribe('deal-farmer', NEEM)).status, 200);
+  const lot = await makeLot(c, { quantity: 4, unitPrice: 450, condition: 'near_expiry' });
+
+  const [alert] = await waitForAlerts('deal-farmer', 1);
+  assert.ok(alert, 'the farmer was told');
+  assert.equal(alert.type, 'stock');
+  assert.equal(alert.title, 'Neem Cake is 25% off near you');
+  assert.match(alert.body, /Center deal, deal \(\d+(\.\d)? km away\) has 4 at Rs 450 instead of Rs 600\. It is near its expiry date\./);
+  assert.equal(alert.refId, NEEM, 'tapping it opens the product, where the deal is listed');
+
+  assert.equal((await call('GET', `/v1/products/${NEEM}/notify-me`, { device: 'deal-farmer' })).json.subscribed, true, 'they still want the regular product');
+
+  await makeLot(c, { quantity: 2, unitPrice: 300 });
+  assert.equal((await waitForAlerts('deal-farmer', 2)).length, 2, 'a second lot is a second piece of news');
+  assert.ok(lot.id);
+});
+
+test('deal alerts: only subscribers of that product, within range', async () => {
+  const c = await makeCenter('deal-range', 0);
+  await subscribe('near-sub', NEEM, 18.5, 74.0);
+  await subscribe('far-sub', NEEM, 19.5, 74.0); // ~110 km away
+  await subscribe('other-product-sub', 'p-vermicompost', 18.5, 74.0);
+  await makeLot(c, {});
+  assert.equal((await waitForAlerts('near-sub', 1)).length, 1);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal((await dealAlerts('far-sub')).length, 0);
+  assert.equal((await dealAlerts('other-product-sub')).length, 0);
+  assert.equal((await dealAlerts('never-subscribed')).length, 0);
+});
+
+test('deal alerts: a refused listing tells nobody', async () => {
+  const c = await makeCenter('deal-refused', 0);
+  await subscribe('refused-sub', NEEM);
+  const res = await call('POST', '/v1/operator/surplus', { device: c.device, body: { productId: NEEM, quantity: 3, unitPrice: 700, condition: 'other' } });
+  assert.equal(res.status, 400);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal((await dealAlerts('refused-sub')).length, 0);
+});
