@@ -4,58 +4,14 @@ process.env.SUPABASE_URL = '';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const http = require('http');
-const crypto = require('crypto');
 
 let server;
 let base;
-let config;
 let db;
 
-// Stand-in for the external Soil Sense service. `analyzer.mode` picks the
-// behaviour; `analyzer.lastRequest` records what was forwarded to it.
-const analyzer = { mode: 'ok', lastRequest: null, server: null };
-
-const startFakeAnalyzer = () =>
-  new Promise((resolve) => {
-    analyzer.server = http.createServer((req, res) => {
-      const chunks = [];
-      req.on('data', (c) => chunks.push(c));
-      req.on('end', () => {
-        analyzer.lastRequest = { method: req.method, url: req.url, contentType: req.headers['content-type'], body: Buffer.concat(chunks).toString('latin1') };
-        const send = (status, payload) => {
-          res.writeHead(status, { 'content-type': 'application/json' });
-          res.end(typeof payload === 'string' ? payload : JSON.stringify(payload));
-        };
-        if (analyzer.mode === 'reject') return send(422, { detail: [{ msg: 'Uploaded file is not an image' }] });
-        if (analyzer.mode === 'down') return send(500, { detail: 'boom' });
-        if (analyzer.mode === 'garbage') return send(201, { hello: 'world' });
-        if (analyzer.mode === 'slow') return; // never answers -> client times out
-        send(201, {
-          id: crypto.randomUUID(),
-          // The real analyzer sends naive UTC: no trailing Z.
-          created_at: new Date().toISOString().replace('Z', '000'),
-          health_score: 71.4,
-          soil_moisture: 52.3,
-          nutrient_n: 38.2,
-          nutrient_p: 66,
-          nutrient_k: 74.5,
-          disease: 'No significant disease indicators',
-          disease_confidence: 88,
-          recommendations: ['Nitrogen is low — apply vermicompost or neem cake before the next watering.'],
-          metadata: null,
-        });
-      });
-    });
-    analyzer.server.listen(0, () => resolve(analyzer.server.address().port));
-  });
-
 test.before(async () => {
-  const analyzerPort = await startFakeAnalyzer();
-  process.env.SOIL_ANALYZER_URL = `http://127.0.0.1:${analyzerPort}/v1/analyze`;
   const { openTestDb } = require('./helpers');
   const { createApp } = require('../src/app');
-  config = require('../src/config');
   db = await openTestDb('t_api');
   const app = createApp(db);
   await new Promise((resolve) => {
@@ -66,7 +22,6 @@ test.before(async () => {
 
 test.after(async () => {
   server.close();
-  analyzer.server.close();
   await require('./helpers').closeTestDb(db);
 });
 
@@ -84,8 +39,8 @@ const call = async (method, path, { body, device, headers = {} } = {}) => {
   return { status: res.status, headers: res.headers, json: text ? JSON.parse(text) : null };
 };
 
-// The fake analyzer never decodes the bytes, so any payload will do.
-const photo = async () => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from('fake-jpeg-bytes-0123456789')]);
+const { testImage } = require('./helpers');
+const photo = () => testImage();
 
 test('health and 404', async () => {
   assert.equal((await call('GET', '/health')).json.status, 'ok');
@@ -100,25 +55,14 @@ test('soil: analyze -> history -> scan by id, matching the Flutter contract', as
   const analyzed = await call('POST', '/v1/analyze', { body: form });
   assert.equal(analyzed.status, 200);
 
-  // The image and the plant type really were forwarded to the analyzer.
-  const forwarded = analyzer.lastRequest;
-  assert.equal(forwarded.method, 'POST');
-  assert.equal(forwarded.url, '/v1/analyze');
-  assert.match(forwarded.contentType, /^multipart\/form-data/);
-  assert.ok(forwarded.body.includes('fake-jpeg-bytes-0123456789'));
-  assert.ok(forwarded.body.includes('name="image"'));
-  // Client said application/octet-stream; the analyzer must still see the real type.
-  assert.match(forwarded.body, /content-type: image\/jpeg/i);
-  assert.doesNotMatch(forwarded.body, /application\/octet-stream/i);
-  assert.ok(forwarded.body.includes('"crop_type":"tomato"'));
-  assert.ok(forwarded.body.includes('"device_id":"dev-soil"'));
   const scan = analyzed.json;
   for (const key of ['id', 'created_at', 'health_score', 'soil_moisture', 'nutrient_n', 'nutrient_p', 'nutrient_k', 'disease', 'disease_confidence']) {
     assert.ok(key in scan, `missing ${key}`);
   }
-  // Naive analyzer time is normalised to explicit UTC, not shifted.
+  // Explicit UTC, close to now.
   assert.ok(scan.created_at.endsWith('Z'));
   assert.ok(Math.abs(Date.now() - Date.parse(scan.created_at)) < 60000);
+  assert.match(scan.id, /^[0-9a-f-]{36}$/);
   assert.ok(scan.recommendations.length > 0);
   assert.equal(scan.metadata.crop_type, 'tomato');
   assert.ok(scan.health_score >= 0 && scan.health_score <= 100);
@@ -152,54 +96,63 @@ test('soil: keeps only the 5 newest scans', async () => {
 test('soil: plant type is optional and also accepted as a plain form field', async () => {
   const bare = await call('POST', '/v1/analyze', { body: await scanForm({ device_id: 'dev-bare' }) });
   assert.equal(bare.status, 200);
-  assert.ok(!analyzer.lastRequest.body.includes('crop_type'));
   assert.ok(!('crop_type' in bare.json.metadata));
 
   const plain = await call('POST', '/v1/analyze', { body: await scanForm({ device_id: 'dev-plain', plant_type: 'chilli' }, { asMetadata: false }) });
   assert.equal(plain.status, 200);
-  assert.ok(analyzer.lastRequest.body.includes('"crop_type":"chilli"'));
   assert.equal(plain.json.metadata.crop_type, 'chilli');
 });
 
-test('soil: request problems are rejected before or relayed from the analyzer', async () => {
-  const noImage = new FormData();
-  noImage.append('metadata_json', JSON.stringify({ device_id: 'dev-many' }));
-  assert.equal((await call('POST', '/v1/analyze', { body: noImage })).status, 400);
-
-  const noDevice = await scanForm({});
-  assert.equal((await call('POST', '/v1/analyze', { body: noDevice })).status, 400);
-
-  analyzer.mode = 'reject';
-  const rejected = await call('POST', '/v1/analyze', { body: await scanForm() });
-  assert.equal(rejected.status, 422);
-  assert.match(rejected.json.error, /not an image/);
-  analyzer.mode = 'ok';
-});
-
-test('soil: analyzer failures become 502/504/503 and are never stored', async () => {
+test('soil: bad requests are rejected and never stored', async () => {
   const before = (await call('GET', '/v1/history?device_id=dev-fail')).json.length;
 
-  for (const mode of ['down', 'garbage']) {
-    analyzer.mode = mode;
-    const res = await call('POST', '/v1/analyze', { body: await scanForm({ device_id: 'dev-fail' }) });
-    assert.equal(res.status, 502, mode);
-  }
+  const noImage = new FormData();
+  noImage.append('metadata_json', JSON.stringify({ device_id: 'dev-fail' }));
+  assert.equal((await call('POST', '/v1/analyze', { body: noImage })).status, 400);
 
-  const originalTimeout = config.soilAnalyzerTimeoutMs;
-  config.soilAnalyzerTimeoutMs = 150;
-  analyzer.mode = 'slow';
-  assert.equal((await call('POST', '/v1/analyze', { body: await scanForm({ device_id: 'dev-fail' }) })).status, 504);
-  config.soilAnalyzerTimeoutMs = originalTimeout;
-  analyzer.mode = 'ok';
+  assert.equal((await call('POST', '/v1/analyze', { body: await scanForm({}) })).status, 400);
 
-  const originalUrl = config.soilAnalyzerUrl;
-  config.soilAnalyzerUrl = '';
-  assert.equal((await call('POST', '/v1/analyze', { body: await scanForm({ device_id: 'dev-fail' }) })).status, 503);
-  config.soilAnalyzerUrl = 'http://127.0.0.1:1/v1/analyze'; // nothing listens here
-  assert.equal((await call('POST', '/v1/analyze', { body: await scanForm({ device_id: 'dev-fail' }) })).status, 502);
-  config.soilAnalyzerUrl = originalUrl;
+  // Not an image at all (unknown magic bytes), whatever the client claims.
+  const text = new FormData();
+  text.append('metadata_json', JSON.stringify({ device_id: 'dev-fail' }));
+  text.append('image', new Blob(['hello, not an image'], { type: 'image/jpeg' }), 'scan.jpg');
+  assert.equal((await call('POST', '/v1/analyze', { body: text })).status, 400);
+
+  // Looks like a JPEG but is truncated garbage: cannot be decoded.
+  const corrupt = new FormData();
+  corrupt.append('metadata_json', JSON.stringify({ device_id: 'dev-fail' }));
+  corrupt.append('image', new Blob([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4])], { type: 'image/jpeg' }), 'scan.jpg');
+  const res = await call('POST', '/v1/analyze', { body: corrupt });
+  assert.equal(res.status, 422);
+  assert.match(res.json.error, /not a valid image/);
 
   assert.equal((await call('GET', '/v1/history?device_id=dev-fail')).json.length, before);
+});
+
+test('soil: the heuristic tells healthy foliage from diseased-looking leaves', async () => {
+  const scanColor = async (color, format) => {
+    const form = new FormData();
+    form.append('metadata_json', JSON.stringify({ device_id: 'dev-color' }));
+    form.append('image', new Blob([await testImage(color, format)]), 'scan.img');
+    const res = await call('POST', '/v1/analyze', { body: form });
+    assert.equal(res.status, 200, format);
+    return res.json;
+  };
+
+  const green = await scanColor([60, 180, 60], 'png');
+  assert.equal(green.disease, 'No disease detected');
+  assert.ok(green.nutrient_n > green.nutrient_p);
+
+  // A uniform brown patch: every pixel counts as an anomaly.
+  const brown = await scanColor([140, 90, 40], 'webp');
+  assert.equal(brown.disease, 'Fungal infection suspected');
+  assert.ok(brown.recommendations.some((r) => /fungicide/i.test(r)));
+
+  // Nearly black: also anomalous, with every nutrient reading at the floor.
+  const dark = await scanColor([10, 10, 10], 'jpeg');
+  assert.equal(dark.disease, 'Fungal infection suspected');
+  assert.equal(dark.nutrient_n, 0);
+  assert.ok(dark.recommendations.some((r) => /nitrogen/i.test(r)));
 });
 
 test('recommendation nudges a first scan when there is none', async () => {

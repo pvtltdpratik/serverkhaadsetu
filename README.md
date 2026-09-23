@@ -40,7 +40,7 @@ Tests run against a real Postgres. Point `TEST_DATABASE_URL` at a throwaway data
 | GET | `/v1/history?device_id=` | up to 5 scans from the last 15 days, newest first |
 | GET | `/v1/scan/:id` | one scan (device-scoped) |
 
-Scans are forwarded to the external Soil Sense analyzer at `SOIL_ANALYZER_URL` (default `http://localhost:8000/v1/analyze`; set it empty to disable scanning). Results are stored here, so history, scan-by-id and the home recommendation work off this server.
+Photos are analysed in-process by `src/services/soilAnalyzer.js` (decoded with [`sharp`](https://sharp.pixelplumbing.com/), scored by a colour heuristic; no separate Python service). Results are stored here, so history, scan-by-id and the home recommendation work off this server.
 
 ### Weather
 `GET /v1/weather?lat=&lon=` — 5-day forecast + place name (Open-Meteo / BigDataCloud, cached 10 min).
@@ -100,7 +100,6 @@ See `API.md` for the full request/response shapes.
 ## Deploying on EC2
 
 - Install Node 20+: `sudo dnf install -y nodejs20`.
-- Set `SOIL_ANALYZER_URL` to wherever the analyzer runs. `localhost:8000` only works if it runs on the same EC2 machine; otherwise use its private/public address and open the port in the security group.
 - Set `PORT`, `API_KEY`, `DATABASE_URL` (+ `DATABASE_SSL=true` for RDS) and `SUPABASE_URL` as `Environment=` lines in the systemd unit. Keep the database password out of the repo.
 - **Nginx must allow photo uploads** — its default body limit is 1 MB. Add `client_max_body_size 10m;` inside the `server { }` block.
 - State lives in Postgres, so several instances can run behind the load balancer. Migrations take an advisory lock, so they are safe to run on every instance's start.

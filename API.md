@@ -89,13 +89,13 @@ No auth. `200 {"status":"ok","uptime":123.4}`
 ## 3. Soil health (snake_case - unchanged contract)
 
 ### `POST /v1/analyze`
-This server **forwards the photo and plant type to the external Soil Sense analyzer** (URL in the server's `SOIL_ANALYZER_URL`, currently `http://localhost:8000/v1/analyze`), stores the result in this device's history, and returns it. The frontend never talks to the analyzer directly and never needs to know its URL.
+This server **analyses the photo itself** (a colour-based heuristic run in-process; no separate analyzer service), stores the result in this device's history, and returns it.
 
 `multipart/form-data`:
 
 | Field | Type | Notes |
 |---|---|---|
-| `image` | file | max 8 MB; JPEG, PNG, WebP or GIF. The real type is detected from the file bytes, so Flutter's default `application/octet-stream` upload works unchanged (the analyzer itself rejects that content type) |
+| `image` | file | max 8 MB; JPEG, PNG, WebP or GIF. The real type is detected from the file bytes, so Flutter's default `application/octet-stream` upload works unchanged |
 | `metadata_json` | text | JSON string: `{"device_id":"<id>","crop_type":"tomato"}` - `device_id` required, `crop_type` (the plant type) optional, <= 50 chars |
 
 Alternatives that also work: send `device_id` and `crop_type` (or `plant_type`) as plain form fields, and/or the device id in the `X-Device-Id` header. `metadata_json` wins if both are present.
@@ -120,8 +120,8 @@ Alternatives that also work: send `device_id` and `crop_type` (or `plant_type`) 
 ```
 - All scores are 0-100. `recommendations` always has at least one entry; the first is the most important (used for the home-card note).
 - `metadata.crop_type` is omitted when none was sent (your parser already treats it as nullable).
-- `id` comes from the analyzer. `created_at` is always an explicit UTC ISO string ending in `Z` (the analyzer itself sends naive UTC with no suffix; the server normalises it), so `DateTime.parse(...).toLocal()` shows the right local time.
-- Errors: `400` (no image, missing device id, bad metadata, or the analyzer says the image format is unsupported), `413` (too large), `422` (analyzer rejected the request; message relayed), `502` (analyzer unreachable or returned an error/unexpected body), `504` (analyzer took longer than 25 s), `503` (scanning disabled: `SOIL_ANALYZER_URL` empty). A failed scan is never stored.
+- `created_at` is always an explicit UTC ISO string ending in `Z`, so `DateTime.parse(...).toLocal()` shows the right local time.
+- Errors: `400` (no image, missing device id, bad metadata, or the file is not JPEG/PNG/WebP/GIF), `413` (too large), `422` (the file looks like an image but cannot be decoded). A failed scan is never stored.
 - This is exactly what `SoilHealthApiDataSource._parseResult` already reads.
 
 ### `GET /v1/history?device_id=<id>`

@@ -11,10 +11,6 @@ module.exports = {
   // The database every Postgres server already has, used to create
   // DATABASE_URL's database if it does not exist yet (see src/db/bootstrap.js).
   databaseBootstrapDb: process.env.DATABASE_BOOTSTRAP_DB || 'postgres',
-  // Full URL of the Soil Sense analyze endpoint. Set it to an empty value to
-  // disable scanning (the API then answers 503).
-  soilAnalyzerUrl: process.env.SOIL_ANALYZER_URL ?? 'http://localhost:8000/v1/analyze',
-  soilAnalyzerTimeoutMs: Number(process.env.SOIL_ANALYZER_TIMEOUT_MS) || 25000,
   // Supabase project URL, e.g. https://xxxx.supabase.co. When set, every /v1
   // call must carry a valid Supabase access token and data is owned by the
   // token's user id. Empty = authentication off (anonymous X-Device-Id).

@@ -1,47 +1,19 @@
-const config = require('../config');
+const crypto = require('crypto');
+const sharp = require('sharp');
 const { HttpError } = require('../utils/http');
 
-const NUMERIC_FIELDS = [
-  'health_score', 'soil_moisture', 'nutrient_n', 'nutrient_p', 'nutrient_k', 'disease_confidence',
-];
+// In-process port of the original Soil Sense Python analyzer (a colour
+// heuristic over a 256x256 RGB thumbnail). The maths is kept identical so
+// scores stay comparable with scans the old service produced. To swap in a
+// real ML model later, replace `computeMetrics` and keep the returned shape.
 
-// Upstream statuses that describe a problem with the request itself and are
-// safe to relay. Anything else (401/404/5xx...) means the analyzer is down or
-// misconfigured, which is our problem, not the client's -> 502.
-const RELAYED = new Set([400, 413, 422]);
+const SIZE = 256;
 
-const upstreamMessage = (status, payload) => {
-  const detail = payload && payload.detail;
-  if (typeof detail === 'string') return detail;
-  if (Array.isArray(detail) && detail[0] && detail[0].msg) {
-    return `Soil analyzer rejected the request: ${detail[0].msg}`;
-  }
-  return `Soil analyzer rejected the request (${status})`;
-};
+const clip = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+const normalize = (v, lo, hi) => clip(((v - lo) / (hi - lo)) * 100, 0, 100);
 
-// The analyzer sends naive UTC timestamps ("2026-09-20T16:04:24.676865", no
-// zone). Clients would read that as local time and show every scan hours off,
-// so it is turned into an explicit UTC ISO string here. Returns null if the
-// value isn't a parseable date.
-const toUtcIso = (raw) => {
-  if (typeof raw !== 'string') return null;
-  const hasZone = /(Z|[+-]\d{2}:?\d{2})$/i.test(raw);
-  const date = new Date(hasZone ? raw : `${raw}Z`);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-};
-
-const isValidResult = (r) =>
-  r &&
-  typeof r.id === 'string' &&
-  typeof r.disease === 'string' &&
-  toUtcIso(r.created_at) !== null &&
-  Array.isArray(r.recommendations) &&
-  NUMERIC_FIELDS.every((k) => typeof r[k] === 'number');
-
-// The analyzer validates the upload by its part Content-Type and rejects
-// application/octet-stream — which is what Flutter's MultipartFile.fromBytes
-// sends by default. So the type is decided here from the file's magic bytes,
-// with the client's declared type only as a fallback.
+// Decides what the bytes really are: Flutter uploads everything as
+// application/octet-stream, so the declared type can't be trusted or required.
 const sniffImageType = (buf) => {
   if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
   if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
@@ -50,49 +22,108 @@ const sniffImageType = (buf) => {
   return null;
 };
 
-const uploadType = (buffer, declared) => {
-  const sniffed = sniffImageType(buffer);
-  if (sniffed) return sniffed;
-  return declared && declared.startsWith('image/') ? declared : 'application/octet-stream';
+// Decodes to a SIZE x SIZE interleaved RGB byte array. Bicubic ("cubic" in
+// sharp) matches Pillow's default resize filter; alpha is dropped, not
+// composited, like Pillow's convert("RGB").
+const loadPixels = async (buffer) => {
+  try {
+    const { data, info } = await sharp(buffer)
+      .removeAlpha()
+      .toColourspace('srgb')
+      .resize(SIZE, SIZE, { fit: 'fill', kernel: 'cubic' })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    if (info.channels !== 3) throw new Error(`expected 3 channels, got ${info.channels}`);
+    return data;
+  } catch (err) {
+    console.error('Could not decode uploaded image:', err.message);
+    throw new HttpError(422, 'Uploaded file is not a valid image');
+  }
 };
 
-// Forwards the photo (and optional crop type) to the external Soil Sense
-// service at SOIL_ANALYZER_URL and returns its AnalysisResponse.
-async function analyzeImage({ buffer, filename, mimetype, deviceId, cropType }) {
-  const url = config.soilAnalyzerUrl;
-  if (!url) throw new HttpError(503, 'Soil analysis is not configured on the server');
+const detectDisease = (data, count) => {
+  let anomalies = 0;
+  for (let i = 0; i < data.length; i += 3) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    // Thresholds are the 0-1 originals (0.4, 0.25) scaled to 0-255 bytes.
+    const brown = r > 102 && r > g && g > b && b < 102;
+    const dark = r < 63.75 && g < 63.75 && b < 63.75;
+    if (brown || dark) anomalies += 1;
+  }
+  const ratio = anomalies / count;
 
-  const form = new FormData();
-  form.append('image', new Blob([buffer], { type: uploadType(buffer, mimetype) }), filename || 'scan.jpg');
-  form.append('metadata_json', JSON.stringify({ device_id: deviceId, ...(cropType ? { crop_type: cropType } : {}) }));
+  if (ratio > 0.12) return { disease: 'Fungal infection suspected', confidence: clip(ratio * 100 * 1.2, 20, 95) };
+  if (ratio > 0.05) return { disease: 'Leaf spot indicators', confidence: clip(ratio * 100 * 1.1, 10, 75) };
+  return { disease: 'No disease detected', confidence: clip(100 - ratio * 120, 60, 99) };
+};
 
-  let response;
-  try {
-    response = await fetch(url, { method: 'POST', body: form, signal: AbortSignal.timeout(config.soilAnalyzerTimeoutMs) });
-  } catch (err) {
-    console.error(`Soil analyzer request to ${url} failed:`, err.message);
-    if (err.name === 'TimeoutError') throw new HttpError(504, 'The soil analysis service took too long to respond. Please try again.');
-    throw new HttpError(502, "Couldn't reach the soil analysis service. Please try again later.");
+const recommend = (m) => {
+  const recs = [];
+  if (m.soil_moisture < 35) recs.push('Increase irrigation to reach optimal moisture levels.');
+  else if (m.soil_moisture > 75) recs.push('Reduce watering; soil moisture is above optimal range.');
+
+  if (m.health_score < 50) recs.push('Inspect plants for pests or nutrient deficiencies; health is low.');
+
+  if (m.nutrient_n < 40) recs.push('Apply nitrogen-rich fertilizer to boost foliar growth.');
+  if (m.nutrient_p < 40) recs.push('Incorporate phosphorus supplements for root development.');
+  if (m.nutrient_k < 40) recs.push('Add potassium fertilizer to improve disease resistance.');
+
+  const disease = m.disease.toLowerCase();
+  if (disease.includes('infection') || disease.includes('spot')) {
+    recs.push('Apply recommended fungicide and remove affected leaves.');
   }
 
-  const text = await response.text();
-  let payload = null;
-  try {
-    payload = JSON.parse(text);
-  } catch {
-    // non-JSON body; handled below
-  }
+  if (recs.length === 0) recs.push('Conditions look healthy. Maintain current agronomic practices.');
+  return recs;
+};
 
-  if (!response.ok) {
-    console.error(`Soil analyzer returned ${response.status}: ${text.slice(0, 300)}`);
-    if (RELAYED.has(response.status)) throw new HttpError(response.status, upstreamMessage(response.status, payload));
-    throw new HttpError(502, 'The soil analysis service returned an error. Please try again later.');
+const computeMetrics = (data) => {
+  const count = data.length / 3;
+  let sumR = 0;
+  let sumG = 0;
+  let sumB = 0;
+  let sumSq = 0;
+  for (let i = 0; i < data.length; i += 3) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    sumR += r;
+    sumG += g;
+    sumB += b;
+    sumSq += r * r + g * g + b * b;
   }
-  if (!isValidResult(payload)) {
-    console.error(`Soil analyzer returned an unexpected body: ${text.slice(0, 300)}`);
-    throw new HttpError(502, 'The soil analysis service returned an unexpected response.');
-  }
-  return { ...payload, created_at: toUtcIso(payload.created_at) };
+  const red = sumR / count;
+  const green = sumG / count;
+  const blue = sumB / count;
+  const brightness = (sumR + sumG + sumB) / data.length;
+  // Population std-dev over every channel value, as numpy's np.std does.
+  const saturation = Math.sqrt(Math.max(sumSq / data.length - brightness * brightness, 0)) / 255;
+
+  const { disease, confidence } = detectDisease(data, count);
+  const metrics = {
+    soil_moisture: clip((0.6 * (green / 255) + 0.4 * (brightness / 255)) * 100, 5, 95),
+    health_score: clip((0.7 * (green / 255) + 0.3 * saturation) * 100, 10, 98),
+    nutrient_n: normalize(green, 60, 200),
+    nutrient_p: normalize(red, 50, 190),
+    nutrient_k: normalize(blue, 40, 180),
+    disease,
+    disease_confidence: confidence,
+  };
+  return { ...metrics, recommendations: recommend(metrics) };
+};
+
+// Analyses a photo in-process and returns the scan result. `deviceId` and
+// `cropType` are accepted for API stability; the heuristic doesn't use them.
+async function analyzeImage({ buffer }) {
+  if (!sniffImageType(buffer)) throw new HttpError(400, 'Unsupported image format. Use JPEG, PNG, WebP or GIF.');
+  const pixels = await loadPixels(buffer);
+  return {
+    id: crypto.randomUUID(),
+    created_at: new Date().toISOString(),
+    ...computeMetrics(pixels),
+  };
 }
 
-module.exports = { analyzeImage };
+module.exports = { analyzeImage, sniffImageType };

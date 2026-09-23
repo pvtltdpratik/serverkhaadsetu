@@ -3,8 +3,6 @@ process.env.SUPABASE_URL = '';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const http = require('http');
-const crypto = require('crypto');
 const { generateKeyPair, exportJWK, createLocalJWKSet, SignJWT } = require('jose');
 
 const SUPABASE = 'https://test-project.supabase.co';
@@ -13,7 +11,6 @@ const ISSUER = `${SUPABASE}/auth/v1`;
 let server;
 let base;
 let db;
-let analyzer;
 let signingKey;
 let strangerKey;
 
@@ -47,21 +44,6 @@ test.before(async () => {
   strangerKey = (await generateKeyPair('ES256')).privateKey;
   const jwk = { ...(await exportJWK(pair.publicKey)), kid: 'test-key', alg: 'ES256', use: 'sig' };
 
-  // Minimal stand-in for the external soil analyzer.
-  analyzer = http.createServer((req, res) => {
-    req.resume();
-    req.on('end', () => {
-      res.writeHead(201, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({
-        id: crypto.randomUUID(), created_at: new Date().toISOString(), health_score: 70, soil_moisture: 50,
-        nutrient_n: 60, nutrient_p: 60, nutrient_k: 60, disease: 'No significant disease indicators',
-        disease_confidence: 90, recommendations: ['ok'], metadata: null,
-      }));
-    });
-  });
-  await new Promise((r) => analyzer.listen(0, r));
-  process.env.SOIL_ANALYZER_URL = `http://127.0.0.1:${analyzer.address().port}/v1/analyze`;
-
   const { openTestDb } = require('./helpers');
   const { createApp } = require('../src/app');
   db = await openTestDb('t_auth');
@@ -72,7 +54,6 @@ test.before(async () => {
 
 test.after(async () => {
   server.close();
-  analyzer.close();
   await require('./helpers').closeTestDb(db);
 });
 
@@ -140,7 +121,7 @@ test('orders and soil scans are owned by the token user, not by what the client 
 
   // User E uploads a scan while claiming to be user F in the metadata.
   const form = new FormData();
-  form.append('image', new Blob([Buffer.from([0xff, 0xd8, 0xff, 0xe0])], { type: 'image/jpeg' }), 'x.jpg');
+  form.append('image', new Blob([await require('./helpers').testJpeg()], { type: 'image/jpeg' }), 'x.jpg');
   form.append('metadata_json', JSON.stringify({ device_id: 'user-f' }));
   const scan = await fetch(`${base}/v1/analyze`, { method: 'POST', headers: { authorization: `Bearer ${a}` }, body: form });
   assert.equal(scan.status, 200);

@@ -28,4 +28,12 @@ const closeTestDb = async (db) => {
   await db.close();
 };
 
-module.exports = { openTestDb, closeTestDb };
+// A real, decodable image: the analyzer runs in-process now, so it needs
+// genuine bytes. `color` is [r, g, b].
+const testImage = (color = [90, 160, 70], format = 'jpeg') =>
+  require('sharp')({ create: { width: 64, height: 48, channels: 3, background: { r: color[0], g: color[1], b: color[2] } } })
+    [format]()
+    .toBuffer();
+const testJpeg = testImage;
+
+module.exports = { openTestDb, closeTestDb, testImage, testJpeg };
