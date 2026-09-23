@@ -6,6 +6,7 @@ const { placeAppOrder } = require('../services/orderPlacement');
 const { resolveOrigin } = require('../services/location');
 const config = require('../config');
 const { notify } = require('../services/notifications');
+const { subscribe, unsubscribe, isSubscribed } = require('../services/backInStock');
 
 const CATEGORIES = ['fertilizer', 'organic', 'pesticide', 'seed', 'equipment'];
 const NUTRIENTS = ['nitrogen', 'phosphorus', 'potassium'];
@@ -48,6 +49,29 @@ module.exports = (db) => {
   }));
 
   router.get('/products/:id', ah(async (req, res) => res.json(await productById(req.params.id))));
+
+  // ---- "Notify me when available" ----
+  // Subscribing remembers WHERE the farmer asked from; when any center within
+  // range receives the product they are told once and the subscription ends.
+  router.get('/products/:id/notify-me', ah(async (req, res) => {
+    await productById(req.params.id);
+    res.json({ subscribed: await isSubscribed(db, deviceId(req), req.params.id) });
+  }));
+
+  router.put('/products/:id/notify-me', ah(async (req, res) => {
+    await productById(req.params.id);
+    const owner = deviceId(req);
+    const located = await resolveOrigin(db, owner, body(req));
+    if (!located) throw new HttpError(400, 'Location needed: send latitude and longitude, or a village, or set your village in your profile.');
+    await subscribe(db, { ownerId: owner, productId: req.params.id, ...located.origin });
+    res.json({ subscribed: true });
+  }));
+
+  router.delete('/products/:id/notify-me', ah(async (req, res) => {
+    await productById(req.params.id);
+    await unsubscribe(db, deviceId(req), req.params.id);
+    res.json({ subscribed: false });
+  }));
 
   router.get('/products/:id/reviews', ah(async (req, res) => {
     await productById(req.params.id);

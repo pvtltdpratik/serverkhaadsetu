@@ -7,6 +7,7 @@ const { notify } = require('../services/notifications');
 const centers = require('../services/centerService');
 const { deductWalkIn, consumeOrderStock } = require('../services/reservations');
 const { checkLowStock } = require('../services/stockAlerts');
+const { notifyBackInStock } = require('../services/backInStock');
 const config = require('../config');
 
 const ORDER_STATUSES = ['pending', 'readyForPickup', 'completed', 'cancelled'];
@@ -249,6 +250,9 @@ module.exports = (db, roles) => {
       expectedQuantity: input.expectedQuantity === undefined ? undefined : num(input.expectedQuantity, 'expectedQuantity', { min: 0, max: 100000, integer: true }),
       note: str(input.note, 'note', { max: 300, optional: true }),
     });
+    // Best effort, after the stock is safely recorded: a failure here must not
+    // undo or fail the receipt itself.
+    notifyBackInStock(db, { centerId: req.center.centerId, productId: item.id }).catch((err) => console.error('Back-in-stock alerts failed:', err.message));
     res.status(201).json(item);
   }));
 

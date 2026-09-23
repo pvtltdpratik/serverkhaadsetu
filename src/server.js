@@ -4,6 +4,7 @@ const { createDb } = require('./db/database');
 const { seedIfEmpty } = require('./db/seed');
 const { createApp } = require('./app');
 const { runReservationMaintenance } = require('./services/reservationJobs');
+const { runReassignment } = require('./services/reassignment');
 
 const MAINTENANCE_INTERVAL_MS = 10 * 60 * 1000;
 
@@ -24,7 +25,10 @@ const main = async () => {
   // instance: the job takes an advisory lock so only one does the work.
   const maintain = () => runReservationMaintenance(db)
     .then((r) => { if (r.expired || r.reminded) console.log(`Reservations: ${r.expired} expired, ${r.reminded} reminded`); })
-    .catch((err) => console.error('Reservation maintenance failed:', err.message));
+    .catch((err) => console.error('Reservation maintenance failed:', err.message))
+    .then(() => runReassignment(db, { timeZone: config.centerTimezone }))
+    .then((r) => { if (r.moved || r.stuck) console.log(`Reassignment: ${r.moved} orders moved, ${r.stuck} with nowhere to go`); })
+    .catch((err) => console.error('Order reassignment failed:', err.message));
   maintain();
   const timer = setInterval(maintain, MAINTENANCE_INTERVAL_MS);
   timer.unref();

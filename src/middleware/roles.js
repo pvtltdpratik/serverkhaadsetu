@@ -28,6 +28,11 @@ const createRoles = (db, { authEnabled, superAdminEmails }) => {
       if (!rows.length) throw new HttpError(403, 'No village center is assigned to your account yet');
       if (rows[0].status !== 'active') throw new HttpError(403, 'Your village center is suspended. Contact the platform admin.');
       req.center = rows[0];
+      // Proof of life for the "offline" rule; at most one write a minute per center.
+      await db.query(
+        "UPDATE village_center SET last_active_at = now() WHERE center_id = $1 AND last_active_at < now() - interval '1 minute'",
+        [rows[0].centerId],
+      );
       next();
     } catch (err) {
       next(err);
