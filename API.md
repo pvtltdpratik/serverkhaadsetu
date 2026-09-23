@@ -267,7 +267,7 @@ These create the `appOrder`s the operator app sees. **Placing an order holds the
 - Other errors: `400`, `404` unknown `productId` / center.
 - **Reservation lifecycle.** Collected (operator verifies the OTP): goods leave the shelf (on hand and reserved both drop) and, if the farmer has no home center yet, this center becomes it. Cancelled by farmer or operator: stock is released. **Not collected within 5 days: the order is cancelled automatically and the stock released.** Reminders arrive as notifications when day 3 and day 5 of the reservation begin (the order day is day 1). A background job runs every 10 minutes (`src/services/reservationJobs.js`).
 
-**`GET /v1/orders`** (device) - this device's orders, newest first (include `pickupOtp` while active).
+**`GET /v1/orders`** (device) - this device's orders, newest first (include `pickupOtp` while active). Every farmer-side order view (list, detail, place, cancel) carries `center:{centerId,name,village,phone}` (or `null` for orders from before centers existed).
 **`GET /v1/orders/:id`** (device) - `404` if it belongs to another device.
 **`POST /v1/orders/:id/cancel`** (device) - only `pending`/`readyForPickup`; else `409`.
 

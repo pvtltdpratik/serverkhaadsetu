@@ -80,6 +80,12 @@ test('placing an order holds stock, tells the farmer where to go, and alerts the
   const item = (await call('GET', '/v1/operator/inventory/items', { device: a.device })).json[0];
   assert.equal(item.available, 7, 'reserved stock is not available to anyone else');
 
+  // The farmer's own views of the order say where to collect it.
+  const mine = (await call('GET', `/v1/orders/${placed.json.id}`)).json;
+  assert.equal(mine.center.name, 'Center hold');
+  assert.ok('phone' in mine.center);
+  assert.equal((await call('GET', '/v1/orders')).json.find((o) => o.id === placed.json.id).center.centerId, a.centerId);
+
   const farmerNote = (await call('GET', '/v1/farmer/notifications')).json.find((n) => n.refId === placed.json.id);
   assert.match(farmerNote.body, /Center hold/);
   assert.match(farmerNote.body, /5 days/);

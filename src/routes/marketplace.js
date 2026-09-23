@@ -89,6 +89,18 @@ module.exports = (db) => {
     return order;
   };
 
+  // Attaches where each order is to be collected, so the app can show the
+  // place and offer a call button without a second request.
+  const withCenter = async (orders) => {
+    const ids = [...new Set(orders.map((o) => o.centerId).filter(Boolean))];
+    if (!ids.length) return orders.map((o) => ({ ...o, center: null }));
+    const { rows } = await db.query(
+      'SELECT center_id AS "centerId", name, village, phone FROM village_center WHERE center_id = ANY($1)', [ids]);
+    const byId = new Map(rows.map((c) => [c.centerId, c]));
+    return orders.map((o) => ({ ...o, center: byId.get(o.centerId) || null }));
+  };
+  const farmerView = async (orders) => (await withCenter(orders)).map((o) => ({ ...serializeOrder(o, { includeOtp: true }), center: o.center }));
+
   router.post('/orders', ah(async (req, res) => {
     const owner = deviceId(req);
     const input = body(req);
@@ -126,16 +138,16 @@ module.exports = (db) => {
       from: 'orders WHERE owner_id = $1',
       params: [deviceId(req)],
       order: 'created_at DESC, id',
-      finish: async (rows) => (await withItems(db, rows)).map((o) => serializeOrder(o, { includeOtp: true })),
+      finish: async (rows) => farmerView(await withItems(db, rows)),
     });
   }));
 
-  router.get('/orders/:id', ah(async (req, res) => res.json(serializeOrder(await ownOrder(req), { includeOtp: true }))));
+  router.get('/orders/:id', ah(async (req, res) => res.json((await farmerView([await ownOrder(req)]))[0])));
 
   router.post('/orders/:id/cancel', ah(async (req, res) => {
     await ownOrder(req); // 404 unless it is this owner's
     const order = await cancelOrder(db, req.params.id);
-    res.json(serializeOrder(order, { includeOtp: true }));
+    res.json((await farmerView([order]))[0]);
   }));
 
   return router;
