@@ -360,14 +360,29 @@ Apply errors: `400` deadline passed, `403` land cap exceeded (checked only if th
 ### `GET /v1/me`
 Call after sign-in. Records the account and returns `{userId, email, name, requestedRole, status, role:"admin"|"operator"|"farmer", center:{centerId,name,status}|null}`.
 
-### Village centers (admin) - `/v1/admin/centers`
-`VillageCenter`: `centerId, name, village, district, latitude, longitude, operatorId, operatorName, phone, isOpen, opensAt "HH:MM", closesAt "HH:MM", status "active"|"suspended", createdAt`.
-- `GET /v1/admin/centers` - filters `status`, `q`; paged.
-- `POST /v1/admin/centers` - `{name, village, latitude, longitude, district?, phone?, operatorName?, operatorId?, opensAt?, closesAt?}` -> `201`. `operatorId` must be a user who has signed in (`404`) and not already run a center (`409`).
-- `GET /v1/admin/centers/:id`, `PATCH /v1/admin/centers/:id` (any of the fields above except operator; `status` suspends/reactivates; `400` if empty).
-- `PUT /v1/admin/centers/:id/operator` - `{"userId":"..."}` assigns, `{"userId":null}` unassigns (`409` if that user runs another center).
-- `GET /v1/admin/users` - everyone who has signed in. Filters `requestedRole`, `q`, `unassigned=true` (not running a center). Each row has `centerId`/`centerName` when they operate one.
-All admin routes: `403` for non-admins.
+### Admin panel API - `/v1/admin/...`
+Everything here needs an administrator (`403` otherwise), and every change is written to the audit log in the same transaction (a failed change leaves no entry).
+
+**Overview** - `GET /overview` -> `{people:{operators:{active,suspended,unassigned,total}, farmers:{active,suspended,total}}, centers:{active,suspended,withoutOperator,total}, orders:{pending,readyForPickup,today}, restockRequests:{pending}, lowStockItems}`.
+
+**People, categorised.** Everyone who has signed in is a `role` (`operator` = owns a center or asked to be one; `farmer`) in a `segment`: `active`, `suspended` (the account, or for an operator their center, is suspended) or `unassigned` (an operator with no center yet). Administrators (`SUPER_ADMIN_EMAILS`) are not listed.
+- `GET /users/summary` -> `{operators:{active,suspended,unassigned,total}, farmers:{active,suspended,total}}`.
+- `GET /users` - filters `role`, `segment`, `q` (name/email/village); paged. Row: `userId, email, name, status, requestedRole, role, segment, centerId, centerName, centerStatus, village, landHoldingHectares, ordersCount, createdAt, lastSeenAt`.
+- `GET /users/:id` - the row plus `profile:{latitude,longitude,locationSource,homeCenterId}` and `activity:{scans, orders:{status:count}}`. `404` for unknown people and administrators.
+- `PATCH /users/:id` - `{status:"suspended"|"active", reason?}`. A suspended person gets `403 {code:"account_suspended"}` on every call except `GET /me` (so the app can explain), immediately; the person is notified. A suspended operator's center stops being offered to farmers and cannot take orders. You cannot change your own account (`400`); administrators are never locked out.
+
+**Village centers.** `VillageCenter`: `centerId, name, village, district, latitude, longitude, operatorId, operatorName, phone, isOpen, opensAt "HH:MM", closesAt "HH:MM", status, createdAt`. The list and detail add `operatorEmail, operatorUserName, operatorStatus, productsStocked, lowStockCount, pendingOrders`.
+- `GET /centers` - filters `status`, `district`, `hasOperator=true|false`, `q`; paged. `GET /centers/:id`.
+- `POST /centers` - `{name, village, latitude, longitude, district?, phone?, operatorName?, operatorId?, opensAt?, closesAt?}` -> `201`. `operatorId` must be a user who has signed in (`404`) and not already run a center (`409`).
+- `PATCH /centers/:id` - any field above except the operator; `status` suspends or reactivates (`400` if nothing to change).
+- `PUT /centers/:id/operator` - `{"userId":"..."}` assigns, `{"userId":null}` unassigns (`409` if that user runs another center).
+- `GET /centers/:id/inventory` - the center's shelves (same item shape as the operator's).
+
+**Orders** - `GET /orders` across every center: filters `status`, `type`, `centerId`, `q` (customer name); each has `centerName`; pickup codes are never included.
+
+**Restock requests (supply chain)** - `GET /restock-requests` (filters `status`, `centerId`), `PATCH /restock-requests/:id` `{status:"approved"|"fulfilled"}`. Flow is `pending -> approved -> fulfilled`; anything else is `409`. **Approving adds the quantity to the center's `incoming`**; the operator is notified; the stock itself is added when the operator confirms receipt (`POST /operator/inventory/receive`), which clears `incoming`.
+
+**Audit log** - `GET /audit` (filters `targetType`, `targetId`; newest first): `{id, adminId, adminEmail, action, targetType, targetId, details, createdAt}`. Actions: `center.create|update|suspend|reactivate|assignOperator|unassignOperator`, `user.suspend|reactivate`, `restock.approved|fulfilled`.
 
 ### Finding a center (farmer) - `/v1/centers`
 `POST /v1/centers/nearby` returns the best centers for a farmer, ranked by distance **and** stock, not just proximity.

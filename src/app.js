@@ -20,6 +20,7 @@ const adminRouter = require('./routes/admin');
 const meRouter = require('./routes/me');
 const centersRouter = require('./routes/centers');
 const { createRoles } = require('./middleware/roles');
+const { createAccountGuard } = require('./middleware/accountGuard');
 
 // `options.auth` lets tests inject their own key set; production reads
 // SUPABASE_URL from the environment.
@@ -44,6 +45,7 @@ const createApp = (db, options = {}) => {
   v1.use(generalLimiter);
   v1.use(requireApiKey(config.apiKey));
   v1.use(auth.middleware);
+  v1.use(createAccountGuard(db, { authEnabled: auth.enabled, isAdmin: roles.isAdmin }));
   v1.use(soilRouter(db)); // POST /analyze, GET /history, GET /scan/:id
   v1.use('/weather', weatherRouter(db));
   v1.use('/farmer', farmerRouter(db));

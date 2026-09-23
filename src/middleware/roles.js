@@ -34,7 +34,7 @@ const createRoles = (db, { authEnabled, superAdminEmails }) => {
     }
   };
 
-  return { isAdmin, requireAdmin, requireOperator };
+  return { isAdmin, requireAdmin, requireOperator, adminEmails: [...admins] };
 };
 
 module.exports = { createRoles };

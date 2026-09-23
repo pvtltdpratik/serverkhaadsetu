@@ -16,7 +16,17 @@ const inventoryColumns =`p.id, p.name, p.unit_label AS "unit", p.price_in_rupees
   ci.incoming, ci.last_restocked_at AS "lastRestockedAt"`;
 const INVENTORY_FROM = 'center_inventory ci JOIN products p ON p.id = ci.product_id';
 
+// A center can serve farmers only if it is active, has an operator, and that
+// operator's account is not suspended. `c` is the village_center alias.
+const SERVICEABLE = `c.status = 'active' AND c.operator_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM app_user su WHERE su.user_id = c.operator_id AND su.status = 'suspended')`;
+
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+// Runs `fn` in a transaction: opens one on the pool, or simply joins the one
+// the caller already has (a transaction client), so the audit log entry can
+// commit or roll back together with the change.
+const inTx = (q, fn) => (typeof q.tx === 'function' ? q.tx(fn) : fn(q));
 
 const newCenterId = () => `center-${crypto.randomUUID()}`;
 
@@ -40,7 +50,7 @@ const assertUserExists = async (q, userId) => {
 const createCenter = async (db, input) => {
   const id = newCenterId();
   try {
-    await db.tx(async (c) => {
+    await inTx(db, async (c) => {
       if (input.operatorId) await assertUserExists(c, input.operatorId);
       await c.query(
         `INSERT INTO village_center (center_id, name, village, district, latitude, longitude, operator_id, operator_name, phone, opens_at, closes_at)
@@ -78,7 +88,7 @@ const updateCenter = async (db, id, changes) => {
 // `userId` null unassigns the center's operator.
 const assignOperator = async (db, centerId, userId) => {
   try {
-    await db.tx(async (c) => {
+    await inTx(db, async (c) => {
       await findCenter(c, centerId);
       if (userId) await assertUserExists(c, userId);
       await c.query('UPDATE village_center SET operator_id = $2 WHERE center_id = $1', [centerId, userId || null]);
@@ -154,6 +164,6 @@ const updateInventorySettings = async (db, { centerId, productId, reorderLevel, 
 };
 
 module.exports = {
-  CENTER_COLUMNS, INVENTORY_COLUMNS: inventoryColumns, INVENTORY_FROM, TIME,
+  CENTER_COLUMNS, INVENTORY_COLUMNS: inventoryColumns, INVENTORY_FROM, SERVICEABLE, TIME,
   findCenter, createCenter, updateCenter, assignOperator, upsertUser, receiveStock, inventoryItem, updateInventorySettings,
 };

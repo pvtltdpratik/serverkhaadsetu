@@ -3,6 +3,7 @@ const { newOrderId, newOtp, insertOrder } = require('./orders');
 const { tryReserve } = require('./reservations');
 const { findNearby } = require('./nearbyCenters');
 const { notify } = require('./notifications');
+const { SERVICEABLE } = require('./centerService');
 
 const RESERVATION_DAYS = 5;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -45,7 +46,7 @@ const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin,
 
     let candidates;
     if (centerId) {
-      const { rows } = await c.query("SELECT 1 FROM village_center WHERE center_id = $1 AND status = 'active' AND operator_id IS NOT NULL", [centerId]);
+      const { rows } = await c.query(`SELECT 1 FROM village_center c WHERE c.center_id = $1 AND ${SERVICEABLE}`, [centerId]);
       if (!rows.length) throw new HttpError(404, 'Village center not found');
       candidates = [centerId];
     } else {

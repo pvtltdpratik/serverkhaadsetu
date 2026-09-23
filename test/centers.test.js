@@ -134,12 +134,12 @@ test('admin creates a center, validates input, and assigns one operator per cent
 });
 
 test('admin can list users, filter unassigned operators, and update or suspend a center', async () => {
-  const users = await call('GET', '/v1/admin/users?requestedRole=operator', { as: admin });
+  const users = await call('GET', '/v1/admin/users?role=operator', { as: admin });
   assert.deepEqual(users.json.map((u) => u.userId).sort(), ['op-a', 'op-b']);
   const c = (await call('POST', '/v1/admin/centers', { as: admin, body: centerBody({ name: 'Spare' }) })).json;
   const op3 = await token('op-c', { meta: { role: 'operator' } });
   await call('GET', '/v1/me', { as: op3 });
-  const free = await call('GET', '/v1/admin/users?requestedRole=operator&unassigned=true', { as: admin });
+  const free = await call('GET', '/v1/admin/users?role=operator&segment=unassigned', { as: admin });
   assert.deepEqual(free.json.map((u) => u.userId), ['op-c']);
 
   const patched = await call('PATCH', `/v1/admin/centers/${c.centerId}`, { as: admin, body: { village: 'Daund', latitude: 18.46 } });

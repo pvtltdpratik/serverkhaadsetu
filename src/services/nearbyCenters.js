@@ -1,5 +1,6 @@
 const { haversineKm, boundingBox, estimateTravelMinutes } = require('./geo');
 const ranking = require('./centerRanking');
+const { SERVICEABLE } = require('./centerService');
 
 const WIDEST_KM = ranking.RADII_KM[ranking.RADII_KM.length - 1];
 
@@ -16,7 +17,7 @@ const findNearby = async (db, { origin, items = [], homeCenterId = null, limit =
             c.operator_name AS "operatorName", c.phone, c.is_open AS "isOpen",
             to_char(c.opens_at, 'HH24:MI') AS "opensAt", to_char(c.closes_at, 'HH24:MI') AS "closesAt"
        FROM village_center c
-      WHERE c.status = 'active' AND c.operator_id IS NOT NULL
+      WHERE ${SERVICEABLE}
         AND c.latitude BETWEEN $1 AND $2 AND c.longitude BETWEEN $3 AND $4`,
     [box.minLat, box.maxLat, box.minLng, box.maxLng],
   );
