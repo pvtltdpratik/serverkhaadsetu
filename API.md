@@ -479,6 +479,15 @@ Nothing is seeded: a new center starts with no orders, farmers or stock. Orders 
 
 Stock levels are not decremented by orders yet (same as the app today).
 
+### Surplus / second-hand stock
+
+Units sold below the catalog price, kept apart from the regular shelf. A lot never affects reorder levels, low-stock alerts or center ranking. Scoped to the operator's own center (another center's lot is `404`).
+
+- `GET /v1/operator/surplus` (filter `status=active|withdrawn`) -> newest first. Each lot: `id, productId, productName, unit, catalogPrice, unitPrice, discountPercent, quantity, reserved, available, condition, bestBefore ("YYYY-MM-DD" or null), note, fromShelf, createdAt, status`. `status` is `active`, `soldOut`, `expired` (best-before passed) or `withdrawn`.
+- `POST /v1/operator/surplus` `{productId, quantity, unitPrice, condition, bestBefore?, note?, fromShelf?}` -> `201` lot. `condition` is `near_expiry | opened | returned | damaged_packaging | other`. `unitPrice` must be **below the catalog price** (`400`). `bestBefore` may be today but not in the past (day counted in `CENTER_TIMEZONE`). With `fromShelf: true` the units are taken off the regular shelf (only what is not reserved; else `409`); otherwise they are new units from outside the supply chain and the shelf is untouched.
+- `PATCH /v1/operator/surplus/:id` `{unitPrice?, note?}` -> lot. Price must stay below the catalog price; a withdrawn lot is `409`.
+- `POST /v1/operator/surplus/:id/withdraw` -> lot. Takes it off sale. Unsold units go back to the shelf if the lot was marked down from it (`409` if that would exceed the shelf's capacity, and the lot stays on sale); units held by an app order stay until that order ends.
+
 ### Earnings
 - `GET /v1/operator/earnings/commission-rate` -> `{"commissionRatePercent":5}`
 - `GET /v1/operator/earnings/summary` -> `{"commissionRatePercent":5,"todaySales":0,"monthSales":2670,"todayCommission":0,"monthCommission":133.5}` - completed orders only; day/month use the **server's** local time. Optional: the screen may keep computing from the orders list as it does now.

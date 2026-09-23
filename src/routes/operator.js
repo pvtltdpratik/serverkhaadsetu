@@ -1,10 +1,11 @@
 const express = require('express');
 const crypto = require('crypto');
-const { HttpError, asyncHandler, str, num, body, sendPaged, likePattern } = require('../utils/http');
+const { HttpError, asyncHandler, str, num, oneOf, bool, isoDate, body, sendPaged, likePattern } = require('../utils/http');
 const { ORDER_COLUMNS, serializeOrder, newOrderId, findOrder, cancelOrder, withItems, insertOrder } = require('../services/orders');
 const { otpLimiter } = require('../middleware/security');
 const { notify } = require('../services/notifications');
 const centers = require('../services/centerService');
+const surplus = require('../services/surplus');
 const { deductWalkIn, consumeOrderStock } = require('../services/reservations');
 const { checkLowStock } = require('../services/stockAlerts');
 const { notifyBackInStock } = require('../services/backInStock');
@@ -288,6 +289,57 @@ module.exports = (db, roles) => {
     );
     res.status(201).json((await db.query(
       `SELECT ${RESTOCK_COLUMNS} FROM restock_requests r JOIN products p ON p.id = r.product_id WHERE r.id = $1`, [id])).rows[0]);
+  }));
+
+  // ---- Surplus / second-hand stock ----
+  // Lots sold below the catalog price, kept apart from the regular shelf.
+  const LOT_STATUSES = ['active', 'withdrawn'];
+
+  router.get('/surplus', ah(async (req, res) => {
+    const params = [req.center.centerId];
+    let where = 'l.center_id = $1';
+    // "active" here means still on the operator's list, i.e. not withdrawn;
+    // sold-out and expired lots are shown so the operator can see what ended.
+    if (req.query.status) {
+      params.push(oneOf(req.query.status, 'status', LOT_STATUSES));
+      where += ` AND l.status = $${params.length}`;
+    }
+    await sendPaged(req, res, db, {
+      select: surplus.LOT_COLUMNS,
+      from: `${surplus.LOT_FROM} WHERE ${where}`,
+      params,
+      order: 'l.created_at DESC, l.id',
+      finish: async (rows) => rows.map(surplus.toMoney),
+    });
+  }));
+
+  router.post('/surplus', ah(async (req, res) => {
+    const input = body(req);
+    const lot = await surplus.createLot(db, {
+      centerId: req.center.centerId,
+      productId: str(input.productId, 'productId', { max: 100 }),
+      quantity: num(input.quantity, 'quantity', { min: 1, max: 100000, integer: true }),
+      unitPrice: num(input.unitPrice, 'unitPrice', { min: 0, max: 10000000 }),
+      condition: oneOf(input.condition, 'condition', surplus.CONDITIONS),
+      bestBefore: input.bestBefore === undefined || input.bestBefore === null ? undefined : isoDate(input.bestBefore, 'bestBefore'),
+      note: str(input.note, 'note', { max: 300, optional: true }),
+      fromShelf: input.fromShelf === undefined ? false : bool(input.fromShelf, 'fromShelf'),
+    });
+    res.status(201).json(lot);
+  }));
+
+  router.patch('/surplus/:id', ah(async (req, res) => {
+    const input = body(req);
+    res.json(await surplus.updateLot(db, {
+      centerId: req.center.centerId,
+      id: req.params.id,
+      unitPrice: input.unitPrice === undefined ? undefined : num(input.unitPrice, 'unitPrice', { min: 0, max: 10000000 }),
+      note: input.note === undefined ? undefined : str(input.note, 'note', { max: 300, optional: true }) || '',
+    }));
+  }));
+
+  router.post('/surplus/:id/withdraw', ah(async (req, res) => {
+    res.json(await surplus.withdrawLot(db, { centerId: req.center.centerId, id: req.params.id }));
   }));
 
   // ---- Earnings ----

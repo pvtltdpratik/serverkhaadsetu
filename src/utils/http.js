@@ -40,6 +40,19 @@ const oneOf = (value, name, allowed) => {
   return value;
 };
 
+const bool = (value, name) => {
+  if (typeof value !== 'boolean') throw new HttpError(400, '"' + name + '" must be true or false');
+  return value;
+};
+
+// A calendar date as YYYY-MM-DD (and a real one: 2026-02-30 is rejected).
+const isoDate = (value, name) => {
+  const parsed = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? new Date(`${value}T00:00:00Z`) : null;
+  const ok = parsed && !Number.isNaN(parsed.getTime()) && parsed.toISOString().startsWith(value);
+  if (!ok) throw new HttpError(400, '"' + name + '" must be a date like 2026-03-31');
+  return value;
+};
+
 const body = (req) => {
   if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
     throw new HttpError(400, 'Request body must be a JSON object');
@@ -91,4 +104,4 @@ const sendPaged = async (req, res, db, { select, from, params = [], order, finis
 // Escapes LIKE wildcards so a search for "50%" matches the text, not everything.
 const likePattern = (text) => `%${String(text).replace(/[\\%_]/g, '\\$&')}%`;
 
-module.exports = { HttpError, asyncHandler, str, num, oneOf, body, deviceId, sendList, sendPaged, likePattern };
+module.exports = { HttpError, asyncHandler, str, num, oneOf, bool, isoDate, body, deviceId, sendList, sendPaged, likePattern };
