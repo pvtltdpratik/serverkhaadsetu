@@ -8,6 +8,7 @@ const assert = require('node:assert/strict');
 let server;
 let base;
 let db;
+let centerId;
 
 test.before(async () => {
   const { openTestDb } = require('./helpers');
@@ -18,6 +19,14 @@ test.before(async () => {
     server = app.listen(0, resolve);
   });
   base = `http://127.0.0.1:${server.address().port}`;
+  // No demo centers are seeded: create one and make device 'op-1' its operator.
+  await fetch(`${base}/v1/me`, { headers: { 'x-device-id': 'op-1' } });
+  const created = await fetch(`${base}/v1/admin/centers`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-device-id': 'admin-dev' },
+    body: JSON.stringify({ name: 'Test Kendra', village: 'Shirur', latitude: 18.83, longitude: 74.38, operatorId: 'op-1' }),
+  });
+  centerId = (await created.json()).centerId;
 });
 
 test.after(async () => {
@@ -30,7 +39,7 @@ const call = async (method, path, { body, device, headers = {} } = {}) => {
     method,
     headers: {
       ...(body && !(body instanceof FormData) ? { 'content-type': 'application/json' } : {}),
-      ...(device ? { 'x-device-id': device } : {}),
+      ...(device ? { 'x-device-id': device } : path.startsWith('/v1/operator') ? { 'x-device-id': 'op-1' } : {}),
       ...headers,
     },
     body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
@@ -225,7 +234,7 @@ test('schemes: directory, apply, idempotence, eligibility', async () => {
 test('orders: farmer places, operator fulfils with OTP', async () => {
   const placed = await call('POST', '/v1/orders', {
     device: 'dev-o',
-    body: { customerName: 'Tester', items: [{ productId: 'p-vermicompost', quantity: 2, unitPrice: 1 }] },
+    body: { customerName: 'Tester', centerId, items: [{ productId: 'p-vermicompost', quantity: 2, unitPrice: 1 }] },
   });
   assert.equal(placed.status, 201);
   assert.equal(placed.json.totalAmount, 900); // price comes from the catalog, not the client
@@ -253,10 +262,15 @@ test('orders: farmer places, operator fulfils with OTP', async () => {
   assert.equal((await call('POST', '/v1/orders', { device: 'dev-o', body: { items: [{ productId: 'zzz', quantity: 1 }] } })).status, 404);
 });
 
-test('operator: seeded orders, walk-in sale, farmers, inventory, earnings', async () => {
+test('operator: orders, walk-in sale, inventory, restock, earnings (scoped to my center)', async () => {
+  // Nothing is seeded for a new center.
+  assert.deepEqual((await call('GET', '/v1/operator/orders?type=walkIn')).json, []);
+  assert.deepEqual((await call('GET', '/v1/operator/farmers')).json, []);
+  assert.deepEqual((await call('GET', '/v1/operator/inventory/items')).json, []);
+  assert.equal((await call('GET', '/v1/operator/farmers/nope')).status, 404);
+
   const orders = await call('GET', '/v1/operator/orders');
-  assert.ok(orders.json.length >= 6);
-  assert.ok(orders.json.every((o) => o.pickupOtp === null));
+  assert.ok(orders.json.every((o) => o.pickupOtp === null && o.centerId === centerId));
   assert.ok(orders.json.every((o) => !('deviceId' in o)));
   assert.equal((await call('GET', '/v1/operator/orders?status=pending')).json.every((o) => o.status === 'pending'), true);
   assert.equal((await call('GET', '/v1/operator/orders?status=bogus')).status, 400);
@@ -267,18 +281,21 @@ test('operator: seeded orders, walk-in sale, farmers, inventory, earnings', asyn
   assert.equal(walkIn.status, 201);
   assert.equal(walkIn.json.status, 'completed');
   assert.equal(walkIn.json.totalAmount, 1200);
+  assert.equal(walkIn.json.centerId, centerId);
   assert.equal((await call('POST', '/v1/operator/orders/walk-in', { body: { items: [{ productName: 'x', quantity: 0, unitPrice: 1 }] } })).status, 400);
 
-  assert.equal((await call('GET', '/v1/operator/farmers')).json.length, 6);
-  assert.equal((await call('GET', '/v1/operator/farmers?needsFollowUp=true')).json.length, 3);
-  assert.equal((await call('GET', '/v1/operator/farmers/farmer-ramesh')).json.activeCrop, 'Wheat');
-  assert.equal((await call('GET', '/v1/operator/farmers/nope')).status, 404);
-
+  const received = await call('POST', '/v1/operator/inventory/receive', { body: { productId: 'p-neemcake', quantity: 5 } });
+  assert.equal(received.status, 201);
+  assert.equal(received.json.currentStock, 5);
+  assert.equal(received.json.available, 5);
   const items = await call('GET', '/v1/operator/inventory/items');
-  assert.equal(items.json.find((i) => i.id === 'inv-neemcake').isLowStock, true);
-  const restock = await call('POST', '/v1/operator/inventory/restock-requests', { body: { itemId: 'inv-neemcake', quantity: 20 } });
+  assert.equal(items.json.length, 1);
+  assert.equal(items.json[0].id, 'p-neemcake');
+
+  const restock = await call('POST', '/v1/operator/inventory/restock-requests', { body: { itemId: 'p-neemcake', quantity: 20 } });
   assert.equal(restock.status, 201);
   assert.equal(restock.json.status, 'pending');
+  assert.equal(restock.json.itemName, 'Neem Cake');
   assert.equal((await call('GET', '/v1/operator/inventory/restock-requests')).json[0].id, restock.json.id);
   assert.equal((await call('POST', '/v1/operator/inventory/restock-requests', { body: { itemId: 'nope', quantity: 1 } })).status, 404);
 
@@ -309,7 +326,7 @@ test('notifications: created by real events, listed, marked read, drive the badg
   assert.equal(await count(), 2);
 
   // 3. an order placed, made ready, collected
-  const placed = (await call('POST', '/v1/orders', { device: dev, body: { items: [{ productId: 'p-neemcake', quantity: 1 }] } })).json;
+  const placed = (await call('POST', '/v1/orders', { device: dev, body: { centerId, items: [{ productId: 'p-neemcake', quantity: 1 }] } })).json;
   await call('POST', `/v1/operator/orders/${placed.id}/ready`);
   await call('POST', `/v1/operator/orders/${placed.id}/verify-otp`, { body: { otp: placed.pickupOtp } });
   assert.equal(await count(), 5);
@@ -344,13 +361,11 @@ test('notifications: created by real events, listed, marked read, drive the badg
   assert.equal((await call('POST', '/v1/farmer/notifications/nope/read', { device: dev })).status, 404);
   assert.equal((await call('GET', '/v1/farmer/notifications')).status, 400);
 
-  // operator cancel notifies too; seeded/walk-in orders (no device) notify nobody
-  const second = (await call('POST', '/v1/orders', { device: dev, body: { items: [{ productId: 'p-sprayer', quantity: 1 }] } })).json;
+  // operator cancel notifies too
+  const second = (await call('POST', '/v1/orders', { device: dev, body: { centerId, items: [{ productId: 'p-sprayer', quantity: 1 }] } })).json;
   await call('POST', `/v1/operator/orders/${second.id}/cancel`);
   const after = (await call('GET', '/v1/farmer/notifications', { device: dev })).json;
   assert.equal(after[0].title, 'Your order was cancelled');
-  await call('POST', '/v1/operator/orders/order-1/ready');
-  assert.equal((await call('GET', '/v1/farmer/notifications', { device: dev })).json.length, after.length);
 });
 
 test('migrations are idempotent and the starter data is only loaded once', async () => {
@@ -408,5 +423,4 @@ test('catalog lists keep their curated order, not alphabetical id order', async 
   const names = (await call('GET', '/v1/products')).json.map((p) => p.name);
   assert.equal(names[0], 'Vermicompost');
   assert.equal(names[1], 'Neem Cake');
-  assert.equal((await call('GET', '/v1/operator/inventory/items')).json[0].name, 'Vermicompost');
 });

@@ -25,6 +25,8 @@ const createAuth = ({ supabaseUrl, jwks } = {}) => {
       const { payload } = await jwtVerify(match[1], keys, { issuer, audience: 'authenticated' });
       if (typeof payload.sub !== 'string' || !payload.sub) throw new Error('token has no subject');
       req.userId = payload.sub;
+      req.userEmail = typeof payload.email === 'string' ? payload.email.toLowerCase() : undefined;
+      req.userMetadata = payload.user_metadata && typeof payload.user_metadata === 'object' ? payload.user_metadata : {};
       return next();
     } catch (err) {
       // Expired tokens are routine (the app refreshes and retries); anything

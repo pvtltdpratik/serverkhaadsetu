@@ -15,6 +15,9 @@ module.exports = {
   // call must carry a valid Supabase access token and data is owned by the
   // token's user id. Empty = authentication off (anonymous X-Device-Id).
   supabaseUrl: process.env.SUPABASE_URL || '',
+  // Comma-separated emails of platform administrators (matched against the
+  // verified Supabase token's email). Nobody is an admin unless listed here.
+  superAdminEmails: (process.env.SUPER_ADMIN_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean),
   commissionRatePercent: Number(process.env.COMMISSION_RATE_PERCENT) || 5,
   corsOrigin: process.env.CORS_ORIGIN || '*',
 };

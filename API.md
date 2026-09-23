@@ -21,7 +21,7 @@ Authorization: Bearer <supabase access token>
 - `GET /health` stays open.
 - With `SUPABASE_URL` empty (local development, tests) authentication is off and the API uses the anonymous `X-Device-Id` described below.
 - Data created before this change was keyed by device id and is not visible to accounts.
-- Operator endpoints only require a valid login; there are no roles yet.
+- Roles are enforced by the server: `/v1/operator/*` needs the caller to own a village center, `/v1/admin/*` needs an email listed in `SUPER_ADMIN_EMAILS`. The role picked at sign-up is only a request, never authority (see section 9).
 
 ### Headers
 
@@ -31,7 +31,7 @@ Authorization: Bearer <supabase access token>
 | `X-Device-Id: <string>` | every **farmer-side** call marked "device" below, **only when authentication is off** | your existing `deviceIdProvider` value. Alternative: `?device_id=<id>` query param. Missing -> `400` |
 | `X-API-Key: <string>` | every `/v1` call, **only if** the server has `API_KEY` set | missing/wrong -> `401` |
 
-Operator endpoints (`/v1/operator/*`) are global to the village center and do **not** need a device id.
+Operator endpoints (`/v1/operator/*`) act on the caller's own village center; the caller is identified like any other user (token, or device id when auth is off).
 
 ### Data formats
 
@@ -346,7 +346,32 @@ Apply errors: `400` deadline passed, `403` land cap exceeded (checked only if th
 
 ---
 
-## 9. Operator (village center) - `/v1/operator/...`
+## 9. Roles, centers and admin
+
+**Who is what** (decided by the server, never by client-editable metadata):
+- **admin** - the verified token's email is in `SUPER_ADMIN_EMAILS` (comma-separated). With authentication off (local dev) admin routes are open.
+- **operator** - the user owns a village center (assigned by an admin). One operator, one center.
+- **farmer** - everyone else. A user who *asked* to be an operator at sign-up but has no center yet is a farmer with `requestedRole:"operator"`.
+
+### `GET /v1/me`
+Call after sign-in. Records the account and returns `{userId, email, name, requestedRole, status, role:"admin"|"operator"|"farmer", center:{centerId,name,status}|null}`.
+
+### Village centers (admin) - `/v1/admin/centers`
+`VillageCenter`: `centerId, name, village, district, latitude, longitude, operatorId, operatorName, phone, isOpen, opensAt "HH:MM", closesAt "HH:MM", status "active"|"suspended", createdAt`.
+- `GET /v1/admin/centers` - filters `status`, `q`; paged.
+- `POST /v1/admin/centers` - `{name, village, latitude, longitude, district?, phone?, operatorName?, operatorId?, opensAt?, closesAt?}` -> `201`. `operatorId` must be a user who has signed in (`404`) and not already run a center (`409`).
+- `GET /v1/admin/centers/:id`, `PATCH /v1/admin/centers/:id` (any of the fields above except operator; `status` suspends/reactivates; `400` if empty).
+- `PUT /v1/admin/centers/:id/operator` - `{"userId":"..."}` assigns, `{"userId":null}` unassigns (`409` if that user runs another center).
+- `GET /v1/admin/users` - everyone who has signed in. Filters `requestedRole`, `q`, `unassigned=true` (not running a center). Each row has `centerId`/`centerName` when they operate one.
+All admin routes: `403` for non-admins.
+
+## 10. Operator (village center) - `/v1/operator/...`
+All routes need the caller to own an **active** center (`403` otherwise) and only ever touch that center's data.
+
+### My center
+- `GET /v1/operator/center` -> `VillageCenter`.
+- `PATCH /v1/operator/center` - `isOpen` (boolean), `opensAt`, `closesAt` (`HH:MM`), `phone`, `operatorName`. Location and status are admin-only and ignored here.
+
 
 No device id. Single shared dataset.
 
@@ -388,10 +413,13 @@ No device id. Single shared dataset.
 | `POST /v1/operator/orders/:id/cancel` | pending/ready only, else `409` |
 | `POST /v1/operator/orders/walk-in` | body `{"customerName":"Sita","items":[{"productName":"Neem Cake","quantity":2,"unitPrice":600}]}`. `customerName` optional (default `"Walk-in customer"`). Creates an already-`completed` `walkIn` order -> `201` |
 
-Seed state: 6 orders (`order-1`..`order-6`) as in the old fake data; seeded OTPs (`4821`, `7093`, `2246`) are not exposed by the operator API.
+Nothing is seeded: a new center starts with no orders, farmers or stock. Orders belong to a center (`centerId`); an operator only ever sees their own center's, and another center's order is a `404`. A farmer order may name its center with an optional `centerId` (`404` if unknown or suspended); without one it is unassigned and no operator sees it yet.
 
 ### Inventory
-- `GET /v1/operator/inventory/items` -> `InventoryItem` + extra `isLowStock`:
+- Stock is per center and per product: `on_hand`, `reserved`, `reorderLevel`, `maxCapacity`, `incoming`. **`available = currentStock - reserved`** is what farmers may be promised. The database refuses `reserved > on hand` and `on hand > capacity`.
+- `POST /v1/operator/inventory/receive` - `{productId, quantity}` adds stock (creates the shelf row the first time), clears the same amount from `incoming`, stamps `lastRestockedAt` -> `201` item. `404` unknown product, `409` over capacity.
+- `PATCH /v1/operator/inventory/items/:productId` - `{reorderLevel?, maxCapacity?}` (`maxCapacity:null` removes the limit); `404` if the center doesn't stock it, `409` if capacity < on hand.
+- `GET /v1/operator/inventory/items` -> only products this center stocks. `id` is the product id; each item is the old `InventoryItem` plus `reserved`, `available`, `maxCapacity`, `incoming`, `lastRestockedAt`; `isLowStock` now means *available* <= reorder level:
   `{ "id":"inv-neemcake","name":"Neem Cake","unit":"bag","unitPrice":600,"currentStock":5,"lowStockThreshold":8,"isLowStock":true }`
 - `GET /v1/operator/inventory/restock-requests` -> newest first:
   `{ "id":"restock-1","itemId":"inv-neemcake","itemName":"Neem Cake","requestedQuantity":30,"status":"approved","requestedDate":"..." }`
@@ -405,7 +433,7 @@ Stock levels are not decremented by orders yet (same as the app today).
 
 ---
 
-## 10. Frontend change checklist
+## 11. Frontend change checklist
 
 | Flutter piece | Replace with |
 |---|---|

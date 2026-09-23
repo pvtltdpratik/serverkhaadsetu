@@ -184,46 +184,8 @@ const buildSeed = (now = Date.now()) => {
     },
   ];
 
-  const farmer = (id, name, village, phone, activeCrop, days, needsFollowUp, notes) => ({
-    id, name, village, phone, activeCrop, lastVisitDate: ago(days * DAY), needsFollowUp, notes,
-  });
-  const farmers = [
-    farmer('farmer-ramesh', 'Ramesh Patil', 'Shirur, Pune', '+91 98221 XXXXX', 'Wheat', 4, false, 'Following up on nitrogen top-dressing recommendation.'),
-    farmer('farmer-suresh', 'Suresh Jadhav', 'Paithan, Aurangabad', '+91 98230 XXXXX', 'Cotton', 18, true, "Asked about bollworm spray results — hasn't reported back."),
-    farmer('farmer-anita', 'Anita Kale', 'Lasalgaon, Nashik', '+91 98221 XXXXX', 'Onion', 1, false, 'Picked up NPK order today.'),
-    farmer('farmer-vikram', 'Vikram Deshmukh', 'Karvir, Kolhapur', '+91 98812 XXXXX', 'Sugarcane', 35, true, 'Waiting to hear how the insurance claim for rain damage went.'),
-    farmer('farmer-meera', 'Meera Shinde', 'Shirur, Pune', '+91 98501 XXXXX', 'Soybean', 9, true, 'Reported a fungal spot issue — check if it has spread.'),
-    farmer('farmer-lakshmi', 'Lakshmi Naik', 'Shirur, Pune', '+91 98904 XXXXX', 'Wheat', 2, false, 'Considering drip irrigation for next season.'),
-  ];
-
-  const inventory = [
-    { id: 'inv-vermicompost', name: 'Vermicompost', unit: 'bag', unitPrice: 450, currentStock: 40, lowStockThreshold: 15 },
-    { id: 'inv-neemcake', name: 'Neem Cake', unit: 'bag', unitPrice: 600, currentStock: 5, lowStockThreshold: 8 },
-    { id: 'inv-biopesticide', name: 'Bio-Pesticide Spray', unit: 'bottle', unitPrice: 320, currentStock: 12, lowStockThreshold: 5 },
-  ];
-
-  const restockRequests = [
-    {
-      id: 'restock-1', itemId: 'inv-neemcake', itemName: 'Neem Cake', requestedQuantity: 30,
-      status: 'approved', requestedDate: ago(2 * DAY),
-    },
-  ];
-
-  const line = (productName, quantity, unitPrice) => ({ productName, quantity, unitPrice });
-  const order = (id, customerName, type, status, items, createdAt, pickupOtp) => ({
-    id, customerName, type, status, items, createdAt, pickupOtp, deviceId: null,
-  });
-  const orders = [
-    order('order-1', 'Ramesh Patil', 'appOrder', 'pending', [line('Neem Cake', 2, 600)], ago(2 * HOUR), '4821'),
-    order('order-2', 'Suresh Jadhav', 'appOrder', 'pending', [line('Vermicompost', 1, 450), line('Bio-Pesticide Spray', 1, 320)], ago(1 * HOUR), '7093'),
-    order('order-3', 'Anita Kale', 'appOrder', 'readyForPickup', [line('Neem Cake', 1, 600)], ago(4 * HOUR), '2246'),
-    order('order-4', 'Vikram Deshmukh', 'appOrder', 'completed', [line('Vermicompost', 3, 450)], ago(6 * HOUR), null),
-    order('order-5', 'Walk-in customer', 'walkIn', 'completed', [line('Vermicompost', 1, 450)], ago(3 * HOUR), null),
-    order('order-6', 'Meera Shinde', 'walkIn', 'completed', [line('Bio-Pesticide Spray', 2, 320)], ago(45 * 60 * 1000), null),
-  ];
-
   return {
-    products, reviews, communityPosts, postComments, agronomists, schemes, farmers, inventory, restockRequests, orders,
+    products, reviews, communityPosts, postComments, agronomists, schemes,
     profiles: communityProfiles,
     applications: [],
     notifications: [],
@@ -277,26 +239,6 @@ const seedIfEmpty = async (db) => {
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
         [s.id, s.name, s.agency, s.category, s.description, s.benefit, s.eligibilityCriteria, s.maxLandHoldingHectares, s.applicationDeadline],
       );
-    }
-    for (const f of d.farmers) {
-      await c.query('INSERT INTO farmers (id, name, village, phone, active_crop, last_visit_date, needs_follow_up, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-        [f.id, f.name, f.village, f.phone, f.activeCrop, f.lastVisitDate, f.needsFollowUp, f.notes]);
-    }
-    for (const i of d.inventory) {
-      await c.query('INSERT INTO inventory_items (id, name, unit, unit_price, current_stock, low_stock_threshold) VALUES ($1,$2,$3,$4,$5,$6)',
-        [i.id, i.name, i.unit, i.unitPrice, i.currentStock, i.lowStockThreshold]);
-    }
-    for (const r of d.restockRequests) {
-      await c.query('INSERT INTO restock_requests (id, item_id, item_name, requested_quantity, status, requested_date) VALUES ($1,$2,$3,$4,$5,$6)',
-        [r.id, r.itemId, r.itemName, r.requestedQuantity, r.status, r.requestedDate]);
-    }
-    for (const o of d.orders) {
-      await c.query('INSERT INTO orders (id, customer_name, type, status, created_at, pickup_otp, owner_id) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-        [o.id, o.customerName, o.type, o.status, o.createdAt, o.pickupOtp, o.deviceId]);
-      for (const [i, item] of o.items.entries()) {
-        await c.query('INSERT INTO order_items (order_id, position, product_name, quantity, unit_price) VALUES ($1,$2,$3,$4,$5)',
-          [o.id, i, item.productName, item.quantity, item.unitPrice]);
-      }
     }
   });
 };

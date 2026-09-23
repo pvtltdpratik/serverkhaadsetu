@@ -4,6 +4,7 @@ const { HttpError, asyncHandler, str, num, body, sendPaged, likePattern } = requ
 const { ORDER_COLUMNS, serializeOrder, newOrderId, findOrder, cancelOrder, withItems, insertOrder } = require('../services/orders');
 const { otpLimiter } = require('../middleware/security');
 const { notify } = require('../services/notifications');
+const centers = require('../services/centerService');
 const config = require('../config');
 
 const ORDER_STATUSES = ['pending', 'readyForPickup', 'completed', 'cancelled'];
@@ -11,22 +12,50 @@ const ORDER_TYPES = ['appOrder', 'walkIn'];
 
 const FARMER_COLUMNS = `id, name, village, phone, active_crop AS "activeCrop", last_visit_date AS "lastVisitDate",
   needs_follow_up AS "needsFollowUp", notes`;
-const ITEM_COLUMNS = `id, name, unit, unit_price AS "unitPrice", current_stock AS "currentStock",
-  low_stock_threshold AS "lowStockThreshold", (current_stock <= low_stock_threshold) AS "isLowStock"`;
-const RESTOCK_COLUMNS = `id, item_id AS "itemId", item_name AS "itemName", requested_quantity AS "requestedQuantity",
-  status, requested_date AS "requestedDate"`;
+const RESTOCK_COLUMNS = `r.id, r.product_id AS "itemId", p.name AS "itemName", r.requested_quantity AS "requestedQuantity",
+  r.status, r.requested_date AS "requestedDate"`;
 
-// The village-center (operator) API. There is one center, so this data is
-// global rather than per-owner.
-module.exports = (db) => {
+// The village-center (operator) API. Every route here is scoped to the
+// caller's own center (`req.center`, set by requireOperator): an operator can
+// never see or touch another center's orders, stock or farmers.
+module.exports = (db, roles) => {
   const router = express.Router();
   const ah = asyncHandler;
+  router.use(roles.requireOperator);
   const view = (order) => serializeOrder(order, { includeOtp: false });
+
+  // An order that belongs to another center (or to none yet) is a 404, not a 403.
+  const ownCenterOrder = (req, order) => {
+    if (order.centerId !== req.center.centerId) throw new HttpError(404, 'Order not found');
+    return order;
+  };
+
+  // ---- My center ----
+  router.get('/center', ah(async (req, res) => res.json(await centers.findCenter(db, req.center.centerId))));
+
+  // The operator's own switches: open/closed, hours, contact. Location and
+  // status are the platform admin's to change.
+  router.patch('/center', ah(async (req, res) => {
+    const input = body(req);
+    const changes = {};
+    if (input.isOpen !== undefined) {
+      if (typeof input.isOpen !== 'boolean') throw new HttpError(400, '"isOpen" must be true or false');
+      changes.isOpen = input.isOpen;
+    }
+    for (const field of ['opensAt', 'closesAt']) {
+      if (input[field] === undefined) continue;
+      if (typeof input[field] !== 'string' || !centers.TIME.test(input[field])) throw new HttpError(400, `"${field}" must be a time like 09:30`);
+      changes[field] = input[field];
+    }
+    if (input.phone !== undefined) changes.phone = str(input.phone, 'phone', { max: 30, optional: true }) || '';
+    if (input.operatorName !== undefined) changes.operatorName = str(input.operatorName, 'operatorName', { max: 120, optional: true }) || '';
+    res.json(await centers.updateCenter(db, req.center.centerId, changes));
+  }));
 
   // ---- Farmers ----
   router.get('/farmers', ah(async (req, res) => {
-    const where = [];
-    const params = [];
+    const params = [req.center.centerId];
+    const where = ['center_id = $1'];
     if (req.query.needsFollowUp !== undefined) {
       params.push(String(req.query.needsFollowUp) === 'true');
       where.push(`needs_follow_up = $${params.length}`);
@@ -37,22 +66,22 @@ module.exports = (db) => {
     }
     await sendPaged(req, res, db, {
       select: FARMER_COLUMNS,
-      from: `farmers${where.length ? ` WHERE ${where.join(' AND ')}` : ''}`,
+      from: `farmers WHERE ${where.join(' AND ')}`,
       params,
       order: 'seq',
     });
   }));
 
   router.get('/farmers/:id', ah(async (req, res) => {
-    const { rows } = await db.query(`SELECT ${FARMER_COLUMNS} FROM farmers WHERE id = $1`, [req.params.id]);
+    const { rows } = await db.query(`SELECT ${FARMER_COLUMNS} FROM farmers WHERE id = $1 AND center_id = $2`, [req.params.id, req.center.centerId]);
     if (!rows.length) throw new HttpError(404, 'Farmer not found');
     res.json(rows[0]);
   }));
 
   // ---- Orders ----
   router.get('/orders', ah(async (req, res) => {
-    const where = [];
-    const params = [];
+    const params = [req.center.centerId];
+    const where = ['center_id = $1'];
     if (req.query.status) {
       if (!ORDER_STATUSES.includes(req.query.status)) throw new HttpError(400, `"status" must be one of: ${ORDER_STATUSES.join(', ')}`);
       params.push(req.query.status);
@@ -65,7 +94,7 @@ module.exports = (db) => {
     }
     await sendPaged(req, res, db, {
       select: ORDER_COLUMNS,
-      from: `orders${where.length ? ` WHERE ${where.join(' AND ')}` : ''}`,
+      from: `orders WHERE ${where.join(' AND ')}`,
       params,
       order: 'created_at DESC, id',
       finish: async (rows) => (await withItems(db, rows)).map(view),
@@ -94,16 +123,17 @@ module.exports = (db) => {
       createdAt: new Date().toISOString(),
       pickupOtp: null,
       ownerId: null,
+      centerId: req.center.centerId,
     };
     await db.tx((c) => insertOrder(c, order));
     res.status(201).json(view(order));
   }));
 
-  router.get('/orders/:id', ah(async (req, res) => res.json(view(await findOrder(db, req.params.id)))));
+  router.get('/orders/:id', ah(async (req, res) => res.json(view(ownCenterOrder(req, await findOrder(db, req.params.id))))));
 
   router.post('/orders/:id/ready', ah(async (req, res) => {
     const order = await db.tx(async (c) => {
-      const current = await findOrder(c, req.params.id, { lock: true });
+      const current = ownCenterOrder(req, await findOrder(c, req.params.id, { lock: true }));
       if (current.status === 'pending') {
         await c.query("UPDATE orders SET status = 'readyForPickup' WHERE id = $1", [current.id]);
         await notify(c, current.ownerId, {
@@ -123,7 +153,7 @@ module.exports = (db) => {
   router.post('/orders/:id/verify-otp', otpLimiter, ah(async (req, res) => {
     const otp = str(body(req).otp, 'otp', { min: 4, max: 4 });
     const order = await db.tx(async (c) => {
-      const current = await findOrder(c, req.params.id, { lock: true });
+      const current = ownCenterOrder(req, await findOrder(c, req.params.id, { lock: true }));
       if (current.status !== 'readyForPickup') throw new HttpError(409, 'This order is not ready for pickup yet');
 
       const expected = Buffer.from(current.pickupOtp || '');
@@ -144,6 +174,7 @@ module.exports = (db) => {
   }));
 
   router.post('/orders/:id/cancel', ah(async (req, res) => {
+    ownCenterOrder(req, await findOrder(db, req.params.id)); // 404 unless it is this center's
     const order = await cancelOrder(db, req.params.id, (c, current) =>
       notify(c, current.ownerId, {
         type: 'order',
@@ -157,24 +188,57 @@ module.exports = (db) => {
 
   // ---- Inventory ----
   router.get('/inventory/items', ah(async (req, res) => {
-    await sendPaged(req, res, db, { select: ITEM_COLUMNS, from: 'inventory_items', order: 'seq' });
+    await sendPaged(req, res, db, {
+      select: centers.INVENTORY_COLUMNS,
+      from: `${centers.INVENTORY_FROM} WHERE ci.center_id = $1`,
+      params: [req.center.centerId],
+      order: 'p.seq',
+    });
+  }));
+
+  // Stock arriving at the center. Adds to what is on hand.
+  router.post('/inventory/receive', ah(async (req, res) => {
+    const input = body(req);
+    const item = await centers.receiveStock(db, {
+      centerId: req.center.centerId,
+      productId: str(input.productId, 'productId', { max: 100 }),
+      quantity: num(input.quantity, 'quantity', { min: 1, max: 100000, integer: true }),
+    });
+    res.status(201).json(item);
+  }));
+
+  // Reorder level and storage capacity for one product.
+  router.patch('/inventory/items/:productId', ah(async (req, res) => {
+    const input = body(req);
+    const changes = {};
+    if (input.reorderLevel !== undefined) changes.reorderLevel = num(input.reorderLevel, 'reorderLevel', { min: 0, max: 1000000, integer: true });
+    if (input.maxCapacity !== undefined) {
+      changes.maxCapacity = input.maxCapacity === null ? null : num(input.maxCapacity, 'maxCapacity', { min: 1, max: 1000000, integer: true });
+    }
+    res.json(await centers.updateInventorySettings(db, { centerId: req.center.centerId, productId: req.params.productId, ...changes }));
   }));
 
   router.get('/inventory/restock-requests', ah(async (req, res) => {
-    await sendPaged(req, res, db, { select: RESTOCK_COLUMNS, from: 'restock_requests', order: 'requested_date DESC, id' });
+    await sendPaged(req, res, db, {
+      select: RESTOCK_COLUMNS,
+      from: 'restock_requests r JOIN products p ON p.id = r.product_id WHERE r.center_id = $1',
+      params: [req.center.centerId],
+      order: 'r.requested_date DESC, r.id',
+    });
   }));
 
   router.post('/inventory/restock-requests', ah(async (req, res) => {
     const input = body(req);
-    const itemId = str(input.itemId, 'itemId', { max: 100 });
+    const productId = str(input.itemId ?? input.productId, 'itemId', { max: 100 });
     const quantity = num(input.quantity, 'quantity', { min: 1, max: 100000, integer: true });
-    const item = (await db.query('SELECT id, name FROM inventory_items WHERE id = $1', [itemId])).rows[0];
-    if (!item) throw new HttpError(404, 'Inventory item not found');
-    const { rows } = await db.query(
-      `INSERT INTO restock_requests (id, item_id, item_name, requested_quantity, status) VALUES ($1,$2,$3,$4,'pending') RETURNING ${RESTOCK_COLUMNS}`,
-      [`restock-${crypto.randomUUID()}`, item.id, item.name, quantity],
+    if (!(await db.query('SELECT 1 FROM products WHERE id = $1', [productId])).rows.length) throw new HttpError(404, 'Product not found');
+    const id = `restock-${crypto.randomUUID()}`;
+    await db.query(
+      `INSERT INTO restock_requests (id, center_id, product_id, requested_quantity, status) VALUES ($1,$2,$3,$4,'pending')`,
+      [id, req.center.centerId, productId, quantity],
     );
-    res.status(201).json(rows[0]);
+    res.status(201).json((await db.query(
+      `SELECT ${RESTOCK_COLUMNS} FROM restock_requests r JOIN products p ON p.id = r.product_id WHERE r.id = $1`, [id])).rows[0]);
   }));
 
   // ---- Earnings ----
@@ -193,8 +257,8 @@ module.exports = (db) => {
          COALESCE(SUM(oi.quantity * oi.unit_price) FILTER (WHERE o.created_at >= $1), 0) AS today,
          COALESCE(SUM(oi.quantity * oi.unit_price) FILTER (WHERE o.created_at >= $2), 0) AS month
        FROM orders o JOIN order_items oi ON oi.order_id = o.id
-       WHERE o.status = 'completed'`,
-      [startOfDay, startOfMonth],
+       WHERE o.status = 'completed' AND o.center_id = $3`,
+      [startOfDay, startOfMonth, req.center.centerId],
     );
     const rate = config.commissionRatePercent;
     const todaySales = rows[0].today;

@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { HttpError } = require('../utils/http');
 
-const ORDER_COLUMNS = 'id, customer_name AS "customerName", type, status, created_at AS "createdAt", pickup_otp AS "pickupOtp", owner_id AS "ownerId"';
+const ORDER_COLUMNS = 'id, customer_name AS "customerName", type, status, created_at AS "createdAt", pickup_otp AS "pickupOtp", owner_id AS "ownerId", center_id AS "centerId"';
 
 const newOrderId = () => `order-${crypto.randomUUID()}`;
 const newOtp = () => String(crypto.randomInt(0, 10000)).padStart(4, '0');
@@ -56,8 +56,8 @@ const cancelOrder = async (db, id, onCancelled) =>
 
 const insertOrder = async (c, order) => {
   await c.query(
-    'INSERT INTO orders (id, customer_name, type, status, created_at, pickup_otp, owner_id) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-    [order.id, order.customerName, order.type, order.status, order.createdAt, order.pickupOtp, order.ownerId],
+    'INSERT INTO orders (id, customer_name, type, status, created_at, pickup_otp, owner_id, center_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+    [order.id, order.customerName, order.type, order.status, order.createdAt, order.pickupOtp, order.ownerId, order.centerId || null],
   );
   for (const [i, item] of order.items.entries()) {
     await c.query(

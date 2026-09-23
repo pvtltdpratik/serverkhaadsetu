@@ -100,6 +100,9 @@ module.exports = (db) => {
       };
     });
     const customerName = str(input.customerName, 'customerName', { max: 80, optional: true });
+    // Which village center will fulfil it. Optional until automatic assignment
+    // arrives; an order with no center is visible to no operator.
+    const centerId = str(input.centerId, 'centerId', { max: 100, optional: true });
 
     const order = await db.tx(async (c) => {
       // Prices always come from the catalog — never trust a client-supplied price.
@@ -113,6 +116,9 @@ module.exports = (db) => {
         if (!product) throw new HttpError(404, 'Product not found');
         return { productName: product.name, quantity: l.quantity, unitPrice: product.price };
       });
+      if (centerId && !(await c.query("SELECT 1 FROM village_center WHERE center_id = $1 AND status = 'active'", [centerId])).rows.length) {
+        throw new HttpError(404, 'Village center not found');
+      }
       const profile = (await c.query('SELECT name FROM profiles WHERE owner_id = $1', [owner])).rows[0];
       const created = {
         id: newOrderId(),
@@ -123,6 +129,7 @@ module.exports = (db) => {
         createdAt: new Date().toISOString(),
         pickupOtp: newOtp(),
         ownerId: owner,
+        centerId: centerId || null,
       };
       await insertOrder(c, created);
       await notify(c, owner, {
