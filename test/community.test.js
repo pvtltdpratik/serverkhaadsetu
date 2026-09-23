@@ -158,6 +158,12 @@ test('like: toggles, is per-farmer, and 404s for an unknown post', async () => {
   assert.equal((await call('POST', '/v1/community/posts/does-not-exist/like')).status, 404);
 });
 
+test('detail: likedByMe reflects the caller, not the post', async () => {
+  await call('POST', '/v1/community/posts/post-4/like', { device: 'me-a' });
+  assert.equal((await call('GET', '/v1/community/posts/post-4', { device: 'me-a' })).json.likedByMe, true);
+  assert.equal((await call('GET', '/v1/community/posts/post-4', { device: 'me-b' })).json.likedByMe, false);
+});
+
 test('concurrent likes from different farmers land on an exact count, and same-farmer races never corrupt the row', async () => {
   const before = (await call('GET', '/v1/community/posts/post-6')).json.likeCount;
 

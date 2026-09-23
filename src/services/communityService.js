@@ -116,6 +116,9 @@ const verifyComment = async (db, { commentId, agronomistId }) => {
 // errors (until a ROLLBACK or a SAVEPOINT), so a caught error here would
 // still fail every later statement in the same transaction with "current
 // transaction is aborted"; ON CONFLICT never raises that error at all.
+const hasLiked = async (q, postId, farmerId) =>
+  (await q.query('SELECT 1 FROM post_like WHERE post_id = $1 AND farmer_id = $2', [postId, farmerId])).rows.length > 0;
+
 const toggleLike = async (db, { postId, farmerId }) => {
   return db.tx(async (c) => {
     await findPost(c, postId);
@@ -139,6 +142,7 @@ module.exports = {
   POST_FROM,
   newPostId,
   findPost,
+  hasLiked,
   findComment,
   commentsForPost,
   createPost,

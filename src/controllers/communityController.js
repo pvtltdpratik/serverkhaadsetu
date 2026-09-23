@@ -37,7 +37,8 @@ module.exports = (db) => ({
   getPost: async (req, res) => {
     const post = await community.findPost(db, req.params.id);
     const comments = await community.commentsForPost(db, req.params.id);
-    res.json({ ...post, comments });
+    const likedByMe = await community.hasLiked(db, req.params.id, deviceId(req));
+    res.json({ ...post, likedByMe, comments });
   },
 
   addComment: async (req, res) => {

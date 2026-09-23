@@ -307,7 +307,7 @@ An agronomist can clean up the wording before verifying it:
 |---|---|
 | `GET /v1/community/posts` | newest first. Filters: `crop`, `district` (case-insensitive exact), `problemType` (enum), `q` (title/content search). Paginated (`limit`/`offset`, `X-Total-Count`) |
 | `POST /v1/community/posts` | body `{title(5-150), content(5-3000), cropTag?, districtTag?, problemTypeTag}` -> `201` post. `farmerId` is the caller. Also inserts the AI draft comment |
-| `GET /v1/community/posts/:id` | one post with all its comments (oldest first) as `comments: [...]`; `404` |
+| `GET /v1/community/posts/:id` | one post with `likedByMe` (whether the caller has liked it) and all its comments (oldest first) as `comments: [...]`; `404` |
 | `POST /v1/community/posts/:id/comments` | body `{content(2-3000), agronomistId?}` -> `201` comment. `agronomistId`, if given, must be a verified agronomist (`404`/`403`) |
 | `PATCH /v1/community/comments/:id` | body `{agronomistId, content}` -> `200` comment with the new wording. Does **not** verify it. `409` if the comment isn't AI-generated, `404`/`403` for an unverified/unknown agronomist |
 | `PATCH /v1/community/comments/:id/verify` | body `{agronomistId}` (must be verified) -> `200` comment with `isAgronomistVerified: true`. `409` if the comment isn't AI-generated |
