@@ -254,11 +254,10 @@ test('a farmer order can only name a real, active center', async () => {
   await call('PATCH', `/v1/admin/centers/${centerA}`, { as: admin, body: { status: 'suspended' } });
   assert.equal((await call('POST', '/v1/orders', { as: farmer, body: { centerId: centerA, items } })).status, 404);
   await call('PATCH', `/v1/admin/centers/${centerA}`, { as: admin, body: { status: 'active' } });
-  // Without a center it still works (unassigned), and no operator can see it.
+  // With neither a center nor a location there is nothing to assign it to.
   const loose = await call('POST', '/v1/orders', { as: farmer, body: { items } });
-  assert.equal(loose.status, 201);
-  assert.equal(loose.json.centerId, null);
-  assert.equal((await call('GET', `/v1/operator/orders/${loose.json.id}`, { as: opA })).status, 404);
+  assert.equal(loose.status, 400);
+  assert.match(loose.json.error, /location/i);
 });
 
 test('migration 003 keeps real farmer orders and drops only the demo data', async () => {

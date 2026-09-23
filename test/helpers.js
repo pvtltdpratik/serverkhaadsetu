@@ -36,4 +36,18 @@ const testImage = (color = [90, 160, 70], format = 'jpeg') =>
     .toBuffer();
 const testJpeg = testImage;
 
-module.exports = { openTestDb, closeTestDb, testImage, testJpeg };
+// A center with an operator and stock, inserted directly (tests that are not
+// about centers just need somewhere for orders to go).
+const seedCenter = async (db, { centerId = 'center-test', operatorId = 'op-test', latitude = 18.5, longitude = 74, stock = {} } = {}) => {
+  await db.query(
+    `INSERT INTO village_center (center_id, name, village, latitude, longitude, operator_id, opens_at, closes_at)
+     VALUES ($1, 'Test Kendra', 'Testpur', $2, $3, $4, '00:00', '23:59')`,
+    [centerId, latitude, longitude, operatorId],
+  );
+  for (const [productId, onHand] of Object.entries(stock)) {
+    await db.query('INSERT INTO center_inventory (center_id, product_id, on_hand) VALUES ($1,$2,$3)', [centerId, productId, onHand]);
+  }
+  return centerId;
+};
+
+module.exports = { openTestDb, closeTestDb, testImage, testJpeg, seedCenter };

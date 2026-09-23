@@ -251,17 +251,21 @@ Optional filters: `category` (enum), `nutrient` (`nitrogen|phosphorus|potassium`
 ### `POST /v1/products/:id/reviews` (new - no UI yet)
 Body `{ "authorName": "Ravi", "rating": 5, "comment": "Great" }` (rating integer 1-5, comment <= 1000). `201` returns the review; the product's `rating`/`reviewCount` update automatically.
 
-### Farmer orders (new - the app has no checkout yet)
-These create the `appOrder`s the operator app sees.
+### Farmer orders
+These create the `appOrder`s the operator app sees. **Placing an order holds the stock** at the assigned center.
 
 **`POST /v1/orders`** (device)
 ```json
-{ "customerName": "Pratik Kolhe", "items": [ { "productId": "p-vermicompost", "quantity": 2 } ] }
+{ "customerName": "Pratik Kolhe", "items": [ { "productId": "p-vermicompost", "quantity": 2 } ],
+  "latitude": 18.83, "longitude": 74.37, "locationSource": "gps", "centerId": "center-..." }
 ```
-- `customerName` optional (defaults to the profile name, then `"Farmer"`). 1-50 items, quantity 1-100.
-- **Prices are taken from the catalog** - never send a price.
-- `201`: an `Order` (see section 9) with `status: "pending"` and a 4-digit **`pickupOtp`** - show it to the farmer to read out at the counter.
-- Errors: `400`, `404` unknown `productId`.
+- `customerName` optional (defaults to the profile name, then `"Farmer"`). 1-50 items, quantity 1-100. **Prices are taken from the catalog** - never send a price.
+- **Which center.** With `centerId` the farmer's own choice is used. Without it the best-ranked center (section 9, "Finding a center") that has **every item** is assigned, from the location in the body (`latitude`+`longitude`, or `village`), else the saved profile location. Neither a center nor a location -> `400`.
+- **Stock is held atomically.** `available = on hand - reserved`. If two farmers race for the last unit, exactly one wins: an automatic assignment quietly falls through to the next-ranked center; an explicit `centerId` that ran dry returns `409`.
+- `201`: an `Order` with `status:"pending"`, a 4-digit **`pickupOtp`**, `centerId`, **`reservedUntil`** (the pickup deadline: 5 days) and `center:{centerId,name,village,phone}`. The farmer gets an in-app notification, and so does the center's operator ("New app order").
+- `409` `{ "error": "...", "code": "out_of_stock", "alternatives": [{centerId,name,village,distanceKm,inventoryStatus,inventoryLabel}] }` - offer these to the farmer. "That center just went out of stock..." for an explicit center, "None of the centers near you have all of these items right now." otherwise.
+- Other errors: `400`, `404` unknown `productId` / center.
+- **Reservation lifecycle.** Collected (operator verifies the OTP): goods leave the shelf (on hand and reserved both drop) and, if the farmer has no home center yet, this center becomes it. Cancelled by farmer or operator: stock is released. **Not collected within 5 days: the order is cancelled automatically and the stock released.** Reminders arrive as notifications when day 3 and day 5 of the reservation begin (the order day is day 1). A background job runs every 10 minutes (`src/services/reservationJobs.js`).
 
 **`GET /v1/orders`** (device) - this device's orders, newest first (include `pickupOtp` while active).
 **`GET /v1/orders/:id`** (device) - `404` if it belongs to another device.
@@ -437,7 +441,7 @@ No device id. Single shared dataset.
 | `POST /v1/operator/orders/:id/ready` | `pending -> readyForPickup`. Already ready -> `200` unchanged. Completed/cancelled -> `409` |
 | `POST /v1/operator/orders/:id/verify-otp` | body `{"otp":"4821"}` (exactly 4 chars). Order must be `readyForPickup` (else `409`). Wrong code -> `400 {"error":"Incorrect OTP - please check with the farmer and try again."}`. Success -> `200`, order `completed` |
 | `POST /v1/operator/orders/:id/cancel` | pending/ready only, else `409` |
-| `POST /v1/operator/orders/walk-in` | body `{"customerName":"Sita","items":[{"productName":"Neem Cake","quantity":2,"unitPrice":600}]}`. `customerName` optional (default `"Walk-in customer"`). Creates an already-`completed` `walkIn` order -> `201` |
+| `POST /v1/operator/orders/walk-in` | body `{"customerName":"Sita","items":[{"productId":"p-neemcake","quantity":2,"unitPrice":600}]}`. Each line needs a catalog `productId` (older clients may send the exact catalog `productName` instead; unknown -> `400`/`404`). `customerName` optional. Creates an already-`completed` `walkIn` order -> `201` **and takes the goods off the shelf immediately, but only out of stock not reserved for app orders**: `409` ("Only 2 of Neem Cake available (3 more reserved for app orders), you asked for 3") if it would dip into reserved stock or the center doesn't stock the product. All-or-nothing across lines. |
 
 Nothing is seeded: a new center starts with no orders, farmers or stock. Orders belong to a center (`centerId`); an operator only ever sees their own center's, and another center's order is a `404`. A farmer order may name its center with an optional `centerId` (`404` if unknown or suspended); without one it is unassigned and no operator sees it yet.
 

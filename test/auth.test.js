@@ -113,7 +113,8 @@ test('orders and soil scans are owned by the token user, not by what the client 
   const a = await token(signingKey, { sub: 'user-e' });
   const b = await token(signingKey, { sub: 'user-f' });
 
-  const order = await call('POST', '/v1/orders', { bearer: a, body: { items: [{ productId: 'p-neemcake', quantity: 1 }] } });
+  const centerId = await require('./helpers').seedCenter(db, { stock: { 'p-neemcake': 5 } });
+  const order = await call('POST', '/v1/orders', { bearer: a, body: { centerId, items: [{ productId: 'p-neemcake', quantity: 1 }] } });
   assert.equal(order.status, 201);
   assert.equal((await call('GET', '/v1/orders', { bearer: a })).json.length, 1);
   assert.equal((await call('GET', '/v1/orders', { bearer: b })).json.length, 0);

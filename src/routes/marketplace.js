@@ -1,7 +1,10 @@
 const express = require('express');
 const crypto = require('crypto');
 const { HttpError, asyncHandler, str, num, oneOf, body, deviceId, sendPaged, likePattern } = require('../utils/http');
-const { ORDER_COLUMNS, serializeOrder, newOrderId, newOtp, findOrder, cancelOrder, withItems, insertOrder } = require('../services/orders');
+const { ORDER_COLUMNS, serializeOrder, findOrder, cancelOrder, withItems } = require('../services/orders');
+const { placeAppOrder } = require('../services/orderPlacement');
+const { resolveOrigin } = require('../services/location');
+const config = require('../config');
 const { notify } = require('../services/notifications');
 
 const CATEGORIES = ['fertilizer', 'organic', 'pesticide', 'seed', 'equipment'];
@@ -100,47 +103,21 @@ module.exports = (db) => {
       };
     });
     const customerName = str(input.customerName, 'customerName', { max: 80, optional: true });
-    // Which village center will fulfil it. Optional until automatic assignment
-    // arrives; an order with no center is visible to no operator.
+    // The farmer may pick a center; otherwise the best one that has everything
+    // is chosen from where they are (GPS/pin/village, or their saved location).
     const centerId = str(input.centerId, 'centerId', { max: 100, optional: true });
+    const located = await resolveOrigin(db, owner, input);
 
-    const order = await db.tx(async (c) => {
-      // Prices always come from the catalog — never trust a client-supplied price.
-      const { rows: products } = await c.query(
-        'SELECT id, name, price_in_rupees AS "price" FROM products WHERE id = ANY($1)',
-        [lines.map((l) => l.productId)],
-      );
-      const byId = new Map(products.map((p) => [p.id, p]));
-      const items = lines.map((l) => {
-        const product = byId.get(l.productId);
-        if (!product) throw new HttpError(404, 'Product not found');
-        return { productName: product.name, quantity: l.quantity, unitPrice: product.price };
-      });
-      if (centerId && !(await c.query("SELECT 1 FROM village_center WHERE center_id = $1 AND status = 'active'", [centerId])).rows.length) {
-        throw new HttpError(404, 'Village center not found');
-      }
-      const profile = (await c.query('SELECT name FROM profiles WHERE owner_id = $1', [owner])).rows[0];
-      const created = {
-        id: newOrderId(),
-        customerName: customerName || profile?.name || 'Farmer',
-        type: 'appOrder',
-        status: 'pending',
-        items,
-        createdAt: new Date().toISOString(),
-        pickupOtp: newOtp(),
-        ownerId: owner,
-        centerId: centerId || null,
-      };
-      await insertOrder(c, created);
-      await notify(c, owner, {
-        type: 'order',
-        title: 'Order placed',
-        body: `Your pickup code is ${created.pickupOtp}. We will tell you when it is ready.`,
-        refId: created.id,
-      });
-      return created;
+    const { order, center } = await placeAppOrder(db, {
+      owner,
+      customerName,
+      lines,
+      centerId,
+      origin: located ? located.origin : null,
+      homeCenterId: located ? located.profile.homeCenterId : null,
+      timeZone: config.centerTimezone,
     });
-    res.status(201).json(serializeOrder(order, { includeOtp: true }));
+    res.status(201).json({ ...serializeOrder(order, { includeOtp: true }), center });
   }));
 
   router.get('/orders', ah(async (req, res) => {

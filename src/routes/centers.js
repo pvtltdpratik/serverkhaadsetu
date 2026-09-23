@@ -1,7 +1,8 @@
 const express = require('express');
-const { HttpError, asyncHandler, str, num, oneOf, body, deviceId } = require('../utils/http');
+const { HttpError, asyncHandler, str, num, body, deviceId } = require('../utils/http');
 const { findNearby } = require('../services/nearbyCenters');
-const { findVillage, searchVillages } = require('../data/villages');
+const { searchVillages } = require('../data/villages');
+const { resolveOrigin } = require('../services/location');
 const config = require('../config');
 
 // Farmer-facing center discovery.
@@ -23,31 +24,9 @@ module.exports = (db) => {
   router.post('/nearby', ah(async (req, res) => {
     const owner = deviceId(req);
     const input = body(req);
-    const profile = (await db.query(
-      `SELECT village, latitude, longitude, location_source AS "source", home_center_id AS "homeCenterId"
-         FROM profiles WHERE owner_id = $1`, [owner])).rows[0] || {};
-
-    let origin = null;
-    let source = null;
-    if (input.latitude !== undefined || input.longitude !== undefined) {
-      origin = {
-        latitude: num(input.latitude, 'latitude', { min: -90, max: 90 }),
-        longitude: num(input.longitude, 'longitude', { min: -180, max: 180 }),
-      };
-      source = input.locationSource === undefined ? 'gps' : oneOf(input.locationSource, 'locationSource', ['gps', 'pin']);
-    } else if (input.village !== undefined) {
-      const village = findVillage(str(input.village, 'village', { max: 120 }));
-      if (!village) throw new HttpError(404, 'We could not find that village. Try turning on location or dropping a pin on the map.');
-      origin = village;
-      source = 'village';
-    } else if (profile.latitude != null) {
-      origin = { latitude: profile.latitude, longitude: profile.longitude };
-      source = profile.source || 'gps';
-    } else if (profile.village && findVillage(profile.village)) {
-      origin = findVillage(profile.village);
-      source = 'village';
-    }
-    if (!origin) throw new HttpError(400, 'Location needed: send latitude and longitude, or a village, or set your village in your profile.');
+    const located = await resolveOrigin(db, owner, input);
+    if (!located) throw new HttpError(400, 'Location needed: send latitude and longitude, or a village, or set your village in your profile.');
+    const { origin, source, profile } = located;
 
     let items = [];
     if (input.items !== undefined) {

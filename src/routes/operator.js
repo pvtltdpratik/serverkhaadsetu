@@ -5,6 +5,7 @@ const { ORDER_COLUMNS, serializeOrder, newOrderId, findOrder, cancelOrder, withI
 const { otpLimiter } = require('../middleware/security');
 const { notify } = require('../services/notifications');
 const centers = require('../services/centerService');
+const { deductWalkIn, consumeOrderStock } = require('../services/reservations');
 const config = require('../config');
 
 const ORDER_STATUSES = ['pending', 'readyForPickup', 'completed', 'cancelled'];
@@ -106,26 +107,44 @@ module.exports = (db, roles) => {
     if (!Array.isArray(input.items) || input.items.length < 1 || input.items.length > 50) {
       throw new HttpError(400, '"items" must be an array of 1-50 entries');
     }
-    const items = input.items.map((raw, i) => {
+    const lines = input.items.map((raw, i) => {
       if (!raw || typeof raw !== 'object') throw new HttpError(400, `items[${i}] must be an object`);
       return {
-        productName: str(raw.productName, `items[${i}].productName`, { max: 120 }),
+        productId: str(raw.productId, `items[${i}].productId`, { max: 100, optional: true }),
+        productName: str(raw.productName, `items[${i}].productName`, { max: 120, optional: true }),
         quantity: num(raw.quantity, `items[${i}].quantity`, { min: 1, max: 10000, integer: true }),
         unitPrice: num(raw.unitPrice, `items[${i}].unitPrice`, { min: 0, max: 10000000 }),
+        index: i,
       };
     });
-    const order = {
-      id: newOrderId(),
-      customerName: str(input.customerName, 'customerName', { max: 80, optional: true }) || 'Walk-in customer',
-      type: 'walkIn',
-      status: 'completed',
-      items,
-      createdAt: new Date().toISOString(),
-      pickupOtp: null,
-      ownerId: null,
-      centerId: req.center.centerId,
-    };
-    await db.tx((c) => insertOrder(c, order));
+    const order = await db.tx(async (c) => {
+      // Every line must be a real catalog product (by id, or by exact name for
+      // older clients): that is what lets the sale come off this center's shelf.
+      const items = [];
+      for (const line of lines) {
+        if (!line.productId && !line.productName) throw new HttpError(400, `items[${line.index}] needs a "productId"`);
+        const { rows } = line.productId
+          ? await c.query('SELECT id, name FROM products WHERE id = $1', [line.productId])
+          : await c.query('SELECT id, name FROM products WHERE lower(name) = lower($1)', [line.productName]);
+        if (!rows.length) throw new HttpError(line.productId ? 404 : 400, `Unknown product "${line.productId || line.productName}"`);
+        items.push({ productId: rows[0].id, productName: rows[0].name, quantity: line.quantity, unitPrice: line.unitPrice });
+      }
+      // The goods leave the shelf now, but only what is not reserved for app orders.
+      await deductWalkIn(c, req.center.centerId, items);
+      const created = {
+        id: newOrderId(),
+        customerName: str(input.customerName, 'customerName', { max: 80, optional: true }) || 'Walk-in customer',
+        type: 'walkIn',
+        status: 'completed',
+        items,
+        createdAt: new Date().toISOString(),
+        pickupOtp: null,
+        ownerId: null,
+        centerId: req.center.centerId,
+      };
+      await insertOrder(c, created);
+      return created;
+    });
     res.status(201).json(view(order));
   }));
 
@@ -162,6 +181,15 @@ module.exports = (db, roles) => {
       if (!match) throw new HttpError(400, 'Incorrect OTP — please check with the farmer and try again.');
 
       await c.query("UPDATE orders SET status = 'completed', pickup_otp = NULL WHERE id = $1", [current.id]);
+      await consumeOrderStock(c, current); // the goods leave the shelf
+      // The first center a farmer actually collects from becomes their home center.
+      if (current.ownerId && current.centerId) {
+        await c.query(
+          `INSERT INTO profiles (owner_id, home_center_id) VALUES ($1,$2)
+           ON CONFLICT (owner_id) DO UPDATE SET home_center_id = COALESCE(profiles.home_center_id, EXCLUDED.home_center_id)`,
+          [current.ownerId, current.centerId],
+        );
+      }
       await notify(c, current.ownerId, {
         type: 'order',
         title: 'Order collected',

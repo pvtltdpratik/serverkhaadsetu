@@ -27,6 +27,13 @@ test.before(async () => {
     body: JSON.stringify({ name: 'Test Kendra', village: 'Shirur', latitude: 18.83, longitude: 74.38, operatorId: 'op-1' }),
   });
   centerId = (await created.json()).centerId;
+  for (const productId of ['p-vermicompost', 'p-neemcake', 'p-sprayer']) {
+    await fetch(`${base}/v1/operator/inventory/receive`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-device-id': 'op-1' },
+      body: JSON.stringify({ productId, quantity: 100 }),
+    });
+  }
 });
 
 test.after(async () => {
@@ -266,7 +273,6 @@ test('operator: orders, walk-in sale, inventory, restock, earnings (scoped to my
   // Nothing is seeded for a new center.
   assert.deepEqual((await call('GET', '/v1/operator/orders?type=walkIn')).json, []);
   assert.deepEqual((await call('GET', '/v1/operator/farmers')).json, []);
-  assert.deepEqual((await call('GET', '/v1/operator/inventory/items')).json, []);
   assert.equal((await call('GET', '/v1/operator/farmers/nope')).status, 404);
 
   const orders = await call('GET', '/v1/operator/orders');
@@ -284,13 +290,13 @@ test('operator: orders, walk-in sale, inventory, restock, earnings (scoped to my
   assert.equal(walkIn.json.centerId, centerId);
   assert.equal((await call('POST', '/v1/operator/orders/walk-in', { body: { items: [{ productName: 'x', quantity: 0, unitPrice: 1 }] } })).status, 400);
 
+  const before = (await call('GET', '/v1/operator/inventory/items')).json.find((i) => i.id === 'p-neemcake');
   const received = await call('POST', '/v1/operator/inventory/receive', { body: { productId: 'p-neemcake', quantity: 5 } });
   assert.equal(received.status, 201);
-  assert.equal(received.json.currentStock, 5);
-  assert.equal(received.json.available, 5);
+  assert.equal(received.json.currentStock, before.currentStock + 5);
+  assert.equal(received.json.available, before.available + 5);
   const items = await call('GET', '/v1/operator/inventory/items');
-  assert.equal(items.json.length, 1);
-  assert.equal(items.json[0].id, 'p-neemcake');
+  assert.equal(items.json.length, 3, 'only what this center stocks');
 
   const restock = await call('POST', '/v1/operator/inventory/restock-requests', { body: { itemId: 'p-neemcake', quantity: 20 } });
   assert.equal(restock.status, 201);

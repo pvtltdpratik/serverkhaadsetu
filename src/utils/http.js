@@ -1,7 +1,10 @@
 class HttpError extends Error {
-  constructor(status, message) {
+  // `details` are extra fields merged into the JSON error body (e.g. the
+  // alternatives offered when an item just went out of stock).
+  constructor(status, message, details) {
     super(message);
     this.status = status;
+    this.details = details;
   }
 }
 

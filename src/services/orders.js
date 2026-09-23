@@ -1,7 +1,9 @@
 const crypto = require('crypto');
 const { HttpError } = require('../utils/http');
+const { releaseOrderStock } = require('./reservations');
 
-const ORDER_COLUMNS = 'id, customer_name AS "customerName", type, status, created_at AS "createdAt", pickup_otp AS "pickupOtp", owner_id AS "ownerId", center_id AS "centerId"';
+const ORDER_COLUMNS = `id, customer_name AS "customerName", type, status, created_at AS "createdAt", pickup_otp AS "pickupOtp",
+  owner_id AS "ownerId", center_id AS "centerId", stock_reserved AS "stockReserved", reserved_until AS "reservedUntil"`;
 
 const newOrderId = () => `order-${crypto.randomUUID()}`;
 const newOtp = () => String(crypto.randomInt(0, 10000)).padStart(4, '0');
@@ -10,7 +12,7 @@ const newOtp = () => String(crypto.randomInt(0, 10000)).padStart(4, '0');
 const withItems = async (q, orders) => {
   if (!orders.length) return orders;
   const { rows } = await q.query(
-    `SELECT order_id, product_name AS "productName", quantity, unit_price AS "unitPrice"
+    `SELECT order_id, product_id AS "productId", product_name AS "productName", quantity, unit_price AS "unitPrice"
        FROM order_items WHERE order_id = ANY($1) ORDER BY order_id, position`,
     [orders.map((o) => o.id)],
   );
@@ -25,7 +27,7 @@ const totalOf = (order) => order.items.reduce((sum, i) => sum + i.quantity * i.u
 // reveal it. The operator app types in what the farmer reads out and the
 // server does the comparison, so the operator API never returns it.
 const serializeOrder = (order, { includeOtp }) => {
-  const { ownerId, ...rest } = order;
+  const { ownerId, stockReserved, ...rest } = order;
   return {
     ...rest,
     pickupOtp: includeOtp ? order.pickupOtp : null,
@@ -50,19 +52,23 @@ const cancelOrder = async (db, id, onCancelled) =>
       throw new HttpError(409, `A ${order.status} order cannot be cancelled`);
     }
     await c.query("UPDATE orders SET status = 'cancelled', pickup_otp = NULL WHERE id = $1", [id]);
+    await releaseOrderStock(c, order); // the held stock goes back on the shelf
     if (onCancelled) await onCancelled(c, order);
     return { ...order, status: 'cancelled', pickupOtp: null };
   });
 
 const insertOrder = async (c, order) => {
   await c.query(
-    'INSERT INTO orders (id, customer_name, type, status, created_at, pickup_otp, owner_id, center_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-    [order.id, order.customerName, order.type, order.status, order.createdAt, order.pickupOtp, order.ownerId, order.centerId || null],
+    `INSERT INTO orders (id, customer_name, type, status, created_at, pickup_otp, owner_id, center_id,
+                         stock_reserved, reserved_until, origin_latitude, origin_longitude)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+    [order.id, order.customerName, order.type, order.status, order.createdAt, order.pickupOtp, order.ownerId, order.centerId || null,
+      Boolean(order.stockReserved), order.reservedUntil || null, order.originLatitude ?? null, order.originLongitude ?? null],
   );
   for (const [i, item] of order.items.entries()) {
     await c.query(
-      'INSERT INTO order_items (order_id, position, product_name, quantity, unit_price) VALUES ($1,$2,$3,$4,$5)',
-      [order.id, i, item.productName, item.quantity, item.unitPrice],
+      'INSERT INTO order_items (order_id, position, product_id, product_name, quantity, unit_price) VALUES ($1,$2,$3,$4,$5,$6)',
+      [order.id, i, item.productId || null, item.productName, item.quantity, item.unitPrice],
     );
   }
 };
