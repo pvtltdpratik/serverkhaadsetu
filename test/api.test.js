@@ -247,32 +247,8 @@ test('marketplace: catalog, filters, reviews', async () => {
   assert.equal((await call('POST', '/v1/products/p-neemcake/reviews', { body: { authorName: 'T', rating: 9, comment: 'x' } })).status, 400);
 });
 
-test('community: posts, filters, replies, likes', async () => {
-  const posts = await call('GET', '/v1/community/posts');
-  assert.equal(posts.json.length, 6);
-  assert.ok(posts.json[0].replyCount >= 0);
-  assert.equal((await call('GET', '/v1/community/posts?crop=wheat')).json.length, 2);
-  assert.equal((await call('GET', '/v1/community/posts?problemType=pest')).json.length, 1);
-
-  const created = await call('POST', '/v1/community/posts', {
-    body: { authorName: 'Tester', title: 'Aphids on mustard', body: 'What organic spray works?', crop: 'Mustard', district: 'Pune', problemType: 'pest' },
-  });
-  assert.equal(created.status, 201);
-  const id = created.json.id;
-  assert.equal(created.json.replyCount, 0);
-
-  const reply = await call('POST', `/v1/community/posts/${id}/replies`, { body: { authorName: 'Helper', body: 'Try neem oil.' } });
-  assert.equal(reply.status, 201);
-  assert.equal((await call('GET', `/v1/community/posts/${id}`)).json.replyCount, 1);
-  assert.equal((await call('GET', `/v1/community/posts/${id}/replies`)).json.length, 1);
-
-  const like1 = await call('POST', `/v1/community/posts/${id}/like`, { device: 'd1' });
-  const like2 = await call('POST', `/v1/community/posts/${id}/like`, { device: 'd1' });
-  assert.equal(like1.json.likeCount, 1);
-  assert.equal(like2.json.likeCount, 1);
-  assert.equal((await call('DELETE', `/v1/community/posts/${id}/like`, { device: 'd1' })).json.likeCount, 0);
-  assert.ok(!('likedBy' in like1.json));
-});
+// The community feature (posts/comments/likes/agronomist verification) has
+// its own suite: test/community.test.js.
 
 test('schemes: directory, apply, idempotence, eligibility', async () => {
   const schemes = await call('GET', '/v1/schemes');
@@ -425,8 +401,11 @@ test('notifications: created by real events, listed, marked read, drive the badg
 });
 
 test('migrations are idempotent and the starter data is only loaded once', async () => {
+  const fs = require('fs');
+  const path = require('path');
   const { openTestDb, closeTestDb } = require('./helpers');
   const { seedIfEmpty } = require('../src/db/seed');
+  const migrationFileCount = fs.readdirSync(path.join(__dirname, '..', 'migrations')).filter((f) => f.endsWith('.sql')).length;
   const fresh = await openTestDb('t_migrate');
   try {
     await fresh.query("UPDATE products SET name = 'Edited' WHERE id = 'p-neemcake'");
@@ -434,7 +413,7 @@ test('migrations are idempotent and the starter data is only loaded once', async
     await seedIfEmpty(fresh); // second run: table is not empty, so nothing is re-inserted
     assert.equal((await fresh.one("SELECT name FROM products WHERE id = 'p-neemcake'")).name, 'Edited');
     assert.equal((await fresh.one('SELECT count(*)::int AS n FROM products')).n, 5);
-    assert.equal((await fresh.one('SELECT count(*)::int AS n FROM schema_migrations')).n, 1);
+    assert.equal((await fresh.one('SELECT count(*)::int AS n FROM schema_migrations')).n, migrationFileCount);
   } finally {
     await closeTestDb(fresh);
   }
@@ -455,13 +434,8 @@ test('X-Total-Count and paging come from SQL, and stay consistent with filters',
 });
 
 test('concurrent requests cannot corrupt counters or double-apply', async () => {
-  const before = (await call('GET', '/v1/community/posts/post-2')).json.likeCount;
-
-  // 12 different devices like at once: the counter must land exactly +12.
-  await Promise.all(Array.from({ length: 12 }, (_, i) => call('POST', '/v1/community/posts/post-2/like', { device: `race-${i}` })));
-  // The same device liking 8 times at once still counts once.
-  await Promise.all(Array.from({ length: 8 }, () => call('POST', '/v1/community/posts/post-2/like', { device: 'race-same' })));
-  assert.equal((await call('GET', '/v1/community/posts/post-2')).json.likeCount, before + 13);
+  // Same-device concurrent like-toggling is covered in test/community.test.js
+  // (its own suite, since community's like is a toggle, not an idempotent add).
 
   // Double-tapping "apply" submits one application and one notification.
   const results = await Promise.all(Array.from({ length: 6 }, () => call('POST', '/v1/schemes/scheme-kcc/apply', { device: 'race-apply' })));

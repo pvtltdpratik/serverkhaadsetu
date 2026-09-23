@@ -58,32 +58,55 @@ const buildSeed = (now = Date.now()) => {
     })),
   );
 
-  const post = (id, authorName, title, body, crop, district, problemType, days, likeCount) => ({
-    id, authorName, title, body, crop, district, problemType,
-    createdAt: ago(days * DAY), likeCount, likedBy: [],
+  // farmerId here is what a Supabase user id (or anonymous device id) would
+  // look like — matching profiles rows below give these display names via
+  // the same LEFT JOIN a real signed-in farmer's posts resolve through.
+  const post = (id, farmerId, title, content, cropTag, districtTag, problemTypeTag, days) => ({
+    id, farmerId, title, content, cropTag, districtTag, problemTypeTag, createdAt: ago(days * DAY),
   });
-  const posts = [
-    post('post-1', 'Ramesh Patil', 'Yellowing leaves on wheat — nitrogen deficiency?',
+  const communityPosts = [
+    post('post-1', 'farmer-ramesh', 'Yellowing leaves on wheat — nitrogen deficiency?',
       'The lower leaves on my wheat crop have started turning pale yellow from the tip inward. Soil scan showed low nitrogen last month. Is a urea top-dressing enough at this stage, or should I wait for the next irrigation cycle?',
-      'Wheat', 'Pune', 'nutrientDeficiency', 2, 12),
-    post('post-2', 'Suresh Jadhav', 'Best time to spray for bollworm in cotton?',
+      'Wheat', 'Pune', 'nutrientDeficiency', 2),
+    post('post-2', 'farmer-suresh', 'Best time to spray for bollworm in cotton?',
       'Started seeing small holes in cotton bolls this week. Local shop suggested a broad-spectrum spray but I want to try the neem-based option first if the infestation is still early.',
-      'Cotton', 'Aurangabad', 'pest', 5, 18),
-    post('post-3', 'Anita Kale', 'Onion prices crashed this week in Nashik mandi',
+      'Cotton', 'Aurangabad', 'pest', 5),
+    post('post-3', 'farmer-anita', 'Onion prices crashed this week in Nashik mandi',
       'Got barely half of what I expected at the Lasalgaon market this week. Anyone holding back their harvest, or is it better to just sell before it drops further?',
-      'Onion', 'Nashik', 'market', 1, 24),
-    post('post-4', 'Vikram Deshmukh', 'Unseasonal rain damaged my sugarcane — insurance claim process?',
+      'Onion', 'Nashik', 'market', 1),
+    post('post-4', 'farmer-vikram', 'Unseasonal rain damaged my sugarcane — insurance claim process?',
       'Heavy rain and waterlogging flattened part of my sugarcane field last week. I have Fasal Bima coverage but have never filed a claim before — what documents did others need?',
-      'Sugarcane', 'Kolhapur', 'weather', 8, 15),
-    post('post-5', 'Meera Shinde', 'White fungus spots on soybean leaves',
+      'Sugarcane', 'Kolhapur', 'weather', 8),
+    post('post-5', 'farmer-meera', 'White fungus spots on soybean leaves',
       "Noticed powdery white patches spreading across soybean leaves after the last humid spell. Doesn't look like the usual rust — anyone dealt with something similar this season?",
-      'Soybean', 'Pune', 'disease', 3, 9),
-    post('post-6', 'Lakshmi Naik', 'Anyone using drip irrigation for wheat successfully?',
+      'Soybean', 'Pune', 'disease', 3),
+    post('post-6', 'farmer-lakshmi', 'Anyone using drip irrigation for wheat successfully?',
       "Considering switching from flood irrigation to drip for the next wheat season to save on water. Would love to hear about real yield and cost experiences, not just the sales pitch.",
-      'Wheat', 'Pune', 'general', 12, 21),
+      'Wheat', 'Pune', 'general', 12),
   ];
 
-  const replyTemplates = [
+  // Display names for the fake farmer ids used above and for commenters below.
+  const communityProfiles = [
+    { ownerId: 'farmer-ramesh', name: 'Ramesh Patil', village: 'Shirur, Pune' },
+    { ownerId: 'farmer-suresh', name: 'Suresh Jadhav', village: 'Paithan, Aurangabad' },
+    { ownerId: 'farmer-anita', name: 'Anita Kale', village: 'Lasalgaon, Nashik' },
+    { ownerId: 'farmer-vikram', name: 'Vikram Deshmukh', village: 'Karvir, Kolhapur' },
+    { ownerId: 'farmer-meera', name: 'Meera Shinde', village: 'Shirur, Pune' },
+    { ownerId: 'farmer-lakshmi', name: 'Lakshmi Naik', village: 'Shirur, Pune' },
+    { ownerId: 'commenter-sunil', name: 'Sunil P.', village: '' },
+    { ownerId: 'commenter-anitak', name: 'Anita K.', village: '' },
+    { ownerId: 'commenter-ravindra', name: 'Ravindra J.', village: '' },
+    { ownerId: 'commenter-meeras', name: 'Meera S.', village: '' },
+    { ownerId: 'commenter-vikramd', name: 'Vikram D.', village: '' },
+    { ownerId: 'commenter-lakshmin', name: 'Lakshmi N.', village: '' },
+  ];
+  const commenterIds = ['commenter-sunil', 'commenter-anitak', 'commenter-ravindra', 'commenter-meeras', 'commenter-vikramd', 'commenter-lakshmin'];
+
+  const agronomists = [
+    { id: 'agro-sanjay', name: 'Dr. Sanjay Deshpande', verifiedStatus: true, specialization: 'Soil Science & Plant Nutrition' },
+  ];
+
+  const commentTemplates = [
     'Faced the same thing last season — sorting it out early made a big difference.',
     'Worth asking at the local Krishi Vigyan Kendra, they usually know the latest guidance.',
     "I'd wait a few days and monitor before doing anything drastic.",
@@ -91,15 +114,32 @@ const buildSeed = (now = Date.now()) => {
     'Following this thread, dealing with something similar right now.',
     'Thanks for posting, this is useful for anyone in the area.',
   ];
-  const replies = posts.flatMap((p, pi) =>
-    [0, 1, 2, 3].map((i) => ({
-      id: `${p.id}-reply-${i}`,
+  const postComments = communityPosts.flatMap((p, pi) => {
+    const farmerComments = [0, 1, 2, 3].map((i) => ({
+      id: `${p.id}-comment-${i}`,
       postId: p.id,
-      authorName: reviewers[(pi + i) % reviewers.length],
-      body: replyTemplates[(pi + i + 2) % replyTemplates.length],
+      farmerId: commenterIds[(pi + i) % commenterIds.length],
+      content: commentTemplates[(pi + i + 2) % commentTemplates.length],
+      isAiGenerated: false,
+      agronomistId: null,
       createdAt: new Date(new Date(p.createdAt).getTime() + (3 + i * 5) * HOUR).toISOString(),
-    })),
-  );
+    }));
+    // One post also gets a direct, already-verified agronomist answer, so the
+    // "verified" badge has an example to render from a fresh database.
+    if (p.id !== 'post-1') return farmerComments;
+    return [
+      ...farmerComments,
+      {
+        id: `${p.id}-comment-agro`,
+        postId: p.id,
+        farmerId: 'agro-sanjay',
+        content: 'Wait for the top-dressing until right after the next irrigation — urea spread on dry soil loses a good share of its nitrogen to volatilization before the roots ever see it.',
+        isAiGenerated: false,
+        agronomistId: 'agro-sanjay',
+        createdAt: new Date(new Date(p.createdAt).getTime() + 26 * HOUR).toISOString(),
+      },
+    ];
+  });
 
   const schemes = [
     {
@@ -183,9 +223,9 @@ const buildSeed = (now = Date.now()) => {
   ];
 
   return {
-    products, reviews, posts, replies, schemes, farmers, inventory, restockRequests, orders,
+    products, reviews, communityPosts, postComments, agronomists, schemes, farmers, inventory, restockRequests, orders,
+    profiles: communityProfiles,
     applications: [],
-    profiles: [],
     notifications: [],
     scans: [],
   };
@@ -212,13 +252,24 @@ const seedIfEmpty = async (db) => {
       await c.query('INSERT INTO reviews (id, product_id, author_name, rating, comment, date) VALUES ($1,$2,$3,$4,$5,$6)',
         [r.id, r.productId, r.authorName, r.rating, r.comment, r.date]);
     }
-    for (const p of d.posts) {
-      await c.query('INSERT INTO posts (id, author_name, title, body, crop, district, problem_type, created_at, like_count) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-        [p.id, p.authorName, p.title, p.body, p.crop, p.district, p.problemType, p.createdAt, p.likeCount]);
+    for (const pr of d.profiles) {
+      await c.query('INSERT INTO profiles (owner_id, name, village) VALUES ($1,$2,$3)', [pr.ownerId, pr.name, pr.village]);
     }
-    for (const r of d.replies) {
-      await c.query('INSERT INTO replies (id, post_id, author_name, body, created_at) VALUES ($1,$2,$3,$4,$5)',
-        [r.id, r.postId, r.authorName, r.body, r.createdAt]);
+    for (const a of d.agronomists) {
+      await c.query('INSERT INTO agronomist (agronomist_id, name, verified_status, specialization) VALUES ($1,$2,$3,$4)',
+        [a.id, a.name, a.verifiedStatus, a.specialization]);
+    }
+    for (const p of d.communityPosts) {
+      await c.query(
+        'INSERT INTO community_post (post_id, farmer_id, title, content, crop_tag, district_tag, problem_type_tag, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+        [p.id, p.farmerId, p.title, p.content, p.cropTag, p.districtTag, p.problemTypeTag, p.createdAt],
+      );
+    }
+    for (const c2 of d.postComments) {
+      await c.query(
+        'INSERT INTO post_comment (comment_id, post_id, farmer_id, content, is_ai_generated, is_agronomist_verified, agronomist_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+        [c2.id, c2.postId, c2.farmerId, c2.content, c2.isAiGenerated, Boolean(c2.agronomistId), c2.agronomistId, c2.createdAt],
+      );
     }
     for (const s of d.schemes) {
       await c.query(

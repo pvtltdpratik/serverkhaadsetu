@@ -271,28 +271,42 @@ These create the `appOrder`s the operator app sees.
 
 ## 7. Community
 
-`ForumPost`:
+Farmers post questions or success stories, other farmers and agronomists answer, and an AI-generated draft answer can be verified (and edited) by a verified agronomist. `farmerId` throughout is the caller's identity — the Supabase user id, or the device id when authentication is off (same as every other farmer-owned resource) — never something the client names in the body.
+
+`CommunityPost`:
 ```json
 {
-  "id": "post-1", "authorName": "Ramesh Patil",
-  "title": "Yellowing leaves on wheat - nitrogen deficiency?", "body": "...",
-  "crop": "Wheat", "district": "Pune", "problemType": "nutrientDeficiency",
-  "createdAt": "2026-09-18T...", "replyCount": 4, "likeCount": 12
+  "postId": "post-1", "farmerId": "a1b2...", "farmerName": "Ramesh Patil",
+  "title": "Yellowing leaves on wheat - nitrogen deficiency?", "content": "...",
+  "cropTag": "Wheat", "districtTag": "Pune", "problemTypeTag": "nutrientDeficiency",
+  "createdAt": "2026-09-18T...", "updatedAt": "2026-09-18T...",
+  "commentCount": 4, "likeCount": 12
 }
 ```
-`replyCount` is computed from real replies.
+`farmerName` is looked up from the farmer's saved profile (`PUT /v1/farmer/profile`), falling back to `"Farmer"` when none was saved. `commentCount`/`likeCount` are computed from the real rows, not maintained counters.
+
+`PostComment`:
+```json
+{
+  "commentId": "comment-1", "postId": "post-1", "farmerId": "a1b2...", "farmerName": "Ramesh Patil",
+  "content": "...", "isAiGenerated": false, "isAgronomistVerified": false,
+  "agronomistId": null, "agronomistName": null, "createdAt": "2026-09-18T..."
+}
+```
+- An ordinary farmer comment: `isAiGenerated: false`, `agronomistId: null`.
+- An agronomist answering directly (`POST .../comments` with `agronomistId`): stored as `isAgronomistVerified: true` immediately — an agronomist's own words don't need separate sign-off. `farmerName` also resolves to the agronomist's name in this case (there is no profile row for an agronomist id).
+- An AI-generated draft (Phase 2): `isAiGenerated: true`, `isAgronomistVerified: false` until `PATCH .../verify` attaches a verified agronomist to it.
 
 | Endpoint | Notes |
 |---|---|
-| `GET /v1/community/posts` | newest first. Filters: `crop`, `district` (case-insensitive exact), `problemType` (enum), `q` (title/body search) |
-| `GET /v1/community/posts/:id` | one post; `404` |
-| `POST /v1/community/posts` | body `{authorName, title(5-150), body(5-3000), crop, district, problemType}` -> `201` post |
-| `GET /v1/community/posts/:id/replies` | oldest first; `ForumReply` = `{id, postId, authorName, body, createdAt}` |
-| `POST /v1/community/posts/:id/replies` | body `{authorName, body}` -> `201` reply |
-| `POST /v1/community/posts/:id/like` | device. Idempotent (one like per device). `200` returns the updated post |
-| `DELETE /v1/community/posts/:id/like` | device. Removes this device's like. `200` updated post |
+| `GET /v1/community/posts` | newest first. Filters: `crop`, `district` (case-insensitive exact), `problemType` (enum), `q` (title/content search). Paginated (`limit`/`offset`, `X-Total-Count`) |
+| `POST /v1/community/posts` | body `{title(5-150), content(5-3000), cropTag?, districtTag?, problemTypeTag}` -> `201` post. `farmerId` is the caller |
+| `GET /v1/community/posts/:id` | one post with all its comments (oldest first) as `comments: [...]`; `404` |
+| `POST /v1/community/posts/:id/comments` | body `{content(2-3000), agronomistId?}` -> `201` comment. `agronomistId`, if given, must be a verified agronomist (`404`/`403`) |
+| `PATCH /v1/community/comments/:id/verify` | body `{agronomistId}` (must be verified) -> `200` comment with `isAgronomistVerified: true`. `409` if the comment isn't AI-generated |
+| `POST /v1/community/posts/:id/like` | **toggle** — likes if not already liked, unlikes if it is. `200 {"liked": bool, "likeCount": n}` |
 
-There is no author identity beyond the `authorName` string you send.
+`Agronomist`: `{agronomistId, name, verifiedStatus, specialization}` — no endpoints yet; verified status is set directly in the database for now.
 
 ---
 
@@ -394,7 +408,7 @@ Stock levels are not decremented by orders yet (same as the app today).
 | `FarmerFakeDataSource` | `GET /v1/farmer/profile` (+ `PUT` from a profile-edit screen) |
 | `RecommendationFakeDataSource` | `GET /v1/farmer/recommendation` |
 | `MarketplaceFakeDataSource` | `GET /v1/products`, `/products/:id`, `/products/:id/reviews` |
-| `CommunityFakeDataSource` | `GET /v1/community/posts`, `/posts/:id`, `/posts/:id/replies` |
+| `CommunityApiDataSource` | rebuild against the new shape: `GET/POST /v1/community/posts`, `GET /posts/:id` (now includes `comments`), `POST /posts/:id/comments`, `PATCH /comments/:id/verify`, `POST /posts/:id/like` (now a toggle) |
 | `SchemesLocalDataSource` | `GET /v1/schemes`, `/schemes/:id`, `/schemes/:id/application`, `POST /schemes/:id/apply` |
 | `FarmersFakeDataSource` | `GET /v1/operator/farmers`, `/farmers/:id` |
 | `InventoryLocalDataSource` | `GET /v1/operator/inventory/items`, `/restock-requests`, `POST /restock-requests` |

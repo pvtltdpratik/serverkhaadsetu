@@ -64,11 +64,14 @@ Scans are forwarded to the external Soil Sense analyzer at `SOIL_ANALYZER_URL` (
 ### Community
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/v1/community/posts` | filters: `crop`, `district`, `problemType`, `q` |
-| POST | `/v1/community/posts` | `{authorName,title,body,crop,district,problemType}` |
-| GET | `/v1/community/posts/:id`, `/:id/replies` | |
-| POST | `/v1/community/posts/:id/replies` | `{authorName, body}` |
-| POST / DELETE | `/v1/community/posts/:id/like` | one like per device, idempotent |
+| GET | `/v1/community/posts` | filters: `crop`, `district`, `problemType`, `q`; paginated |
+| POST | `/v1/community/posts` | `{title, content, cropTag?, districtTag?, problemTypeTag}` |
+| GET | `/v1/community/posts/:id` | post + all its comments |
+| POST | `/v1/community/posts/:id/comments` | `{content, agronomistId?}` — farmer, or an agronomist answering directly |
+| PATCH | `/v1/community/comments/:id/verify` | `{agronomistId}` — attaches agronomist sign-off to an AI-generated comment |
+| POST | `/v1/community/posts/:id/like` | toggle — likes if not liked, unlikes if it is |
+
+See `API.md` for the full request/response shapes.
 
 ### Government schemes
 | Method | Path | Notes |
