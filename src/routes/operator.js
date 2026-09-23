@@ -6,7 +6,7 @@ const { otpLimiter } = require('../middleware/security');
 const { notify } = require('../services/notifications');
 const centers = require('../services/centerService');
 const surplus = require('../services/surplus');
-const { deductWalkIn, consumeOrderStock } = require('../services/reservations');
+const { deductWalkIn, deductWalkInLots, consumeOrderStock } = require('../services/reservations');
 const { checkLowStock } = require('../services/stockAlerts');
 const { notifyBackInStock } = require('../services/backInStock');
 const config = require('../config');
@@ -128,8 +128,10 @@ module.exports = (db, roles) => {
       return {
         productId: str(raw.productId, `items[${i}].productId`, { max: 100, optional: true }),
         productName: str(raw.productName, `items[${i}].productName`, { max: 120, optional: true }),
+        // A line can be a surplus lot's units instead of shelf stock; its price then defaults to the lot's.
+        surplusLotId: str(raw.surplusLotId, `items[${i}].surplusLotId`, { max: 100, optional: true }),
         quantity: num(raw.quantity, `items[${i}].quantity`, { min: 1, max: 10000, integer: true }),
-        unitPrice: num(raw.unitPrice, `items[${i}].unitPrice`, { min: 0, max: 10000000 }),
+        unitPrice: raw.unitPrice === undefined && raw.surplusLotId ? undefined : num(raw.unitPrice, `items[${i}].unitPrice`, { min: 0, max: 10000000 }),
         index: i,
       };
     });
@@ -138,6 +140,17 @@ module.exports = (db, roles) => {
       // older clients): that is what lets the sale come off this center's shelf.
       const items = [];
       for (const line of lines) {
+        if (line.surplusLotId) {
+          const { rows: [lot] } = await c.query(
+            `SELECT l.product_id AS "productId", l.unit_price AS "price", p.name FROM surplus_lot l JOIN products p ON p.id = l.product_id
+              WHERE l.id = $1 AND l.center_id = $2`, [line.surplusLotId, req.center.centerId]);
+          if (!lot) throw new HttpError(404, 'Surplus lot not found');
+          items.push({
+            productId: lot.productId, surplusLotId: line.surplusLotId, productName: lot.name, quantity: line.quantity,
+            unitPrice: line.unitPrice === undefined ? Number(lot.price) : line.unitPrice,
+          });
+          continue;
+        }
         if (!line.productId && !line.productName) throw new HttpError(400, `items[${line.index}] needs a "productId"`);
         const { rows } = line.productId
           ? await c.query('SELECT id, name FROM products WHERE id = $1', [line.productId])
@@ -146,8 +159,10 @@ module.exports = (db, roles) => {
         items.push({ productId: rows[0].id, productName: rows[0].name, quantity: line.quantity, unitPrice: line.unitPrice });
       }
       // The goods leave the shelf now, but only what is not reserved for app orders.
-      await deductWalkIn(c, req.center.centerId, items);
-      await checkLowStock(c, req.center.centerId, items.map((i) => i.productId));
+      const shelfItems = items.filter((i) => !i.surplusLotId);
+      await deductWalkIn(c, req.center.centerId, shelfItems);
+      await deductWalkInLots(c, req.center.centerId, items.filter((i) => i.surplusLotId));
+      await checkLowStock(c, req.center.centerId, shelfItems.map((i) => i.productId));
       const created = {
         id: newOrderId(),
         customerName: str(input.customerName, 'customerName', { max: 80, optional: true }) || 'Walk-in customer',

@@ -367,3 +367,82 @@ test('admin: withdrawing a lot tells the operator why, is audited, and is refuse
   assert.equal((await call('POST', `/v1/admin/surplus/${lot.id}/withdraw`, { device: 'admin' })).status, 409);
   assert.equal((await call('POST', '/v1/admin/surplus/lot-nope/withdraw', { device: 'admin' })).status, 404);
 });
+
+const walkIn = (c, items) => call('POST', '/v1/operator/orders/walk-in', { device: c.device, body: { items } });
+
+test('walk-in: selling surplus at the counter takes units off the lot, at the lot price unless the operator sets one', async () => {
+  const c = await makeCenter('walk');
+  await receive(c, 10);
+  const lot = await makeLot(c, { quantity: 6, unitPrice: 420 });
+
+  const res = await walkIn(c, [{ surplusLotId: lot.id, quantity: 2 }]);
+  assert.equal(res.status, 201, JSON.stringify(res.json));
+  assert.equal(res.json.type, 'walkIn');
+  assert.equal(res.json.status, 'completed');
+  assert.equal(res.json.items[0].surplusLotId, lot.id);
+  assert.equal(res.json.items[0].productName, 'Neem Cake');
+  assert.equal(res.json.items[0].unitPrice, 420, 'defaults to the surplus price');
+  assert.equal(res.json.totalAmount, 840);
+
+  const after = await lotOf(c, lot.id);
+  assert.equal(after.quantity, 4);
+  assert.equal(after.available, 4);
+  assert.equal((await shelf(c)).currentStock, 10, 'the regular shelf is untouched');
+
+  const haggled = await walkIn(c, [{ surplusLotId: lot.id, quantity: 1, unitPrice: 300 }]);
+  assert.equal(haggled.json.items[0].unitPrice, 300, 'the operator can still set a price');
+});
+
+test('walk-in: cannot take units an app order is holding, and a refusal changes nothing (shelf lines included)', async () => {
+  const c = await makeCenter('walk-held');
+  await receive(c, 10);
+  const lot = await makeLot(c, { quantity: 5 });
+  await buy(lot.id, 4, { device: 'online-buyer' }); // 1 free
+
+  const res = await walkIn(c, [{ productId: NEEM, quantity: 3, unitPrice: 600 }, { surplusLotId: lot.id, quantity: 2 }]);
+  assert.equal(res.status, 409);
+  assert.match(errorText(res), /Only 1 of the surplus Neem Cake available \(4 more reserved for app orders\)/);
+  assert.equal((await shelf(c)).currentStock, 10, 'the shelf line was not taken either');
+  assert.equal((await lotOf(c, lot.id)).quantity, 5);
+});
+
+test('walk-in: a mixed counter sale takes from both the shelf and the lot', async () => {
+  const c = await makeCenter('walk-mixed');
+  await receive(c, 10);
+  const lot = await makeLot(c, { quantity: 3 });
+  const res = await walkIn(c, [{ productId: NEEM, quantity: 2, unitPrice: 600 }, { surplusLotId: lot.id, quantity: 3 }]);
+  assert.equal(res.status, 201, JSON.stringify(res.json));
+  assert.equal((await shelf(c)).currentStock, 8);
+  const after = await lotOf(c, lot.id);
+  assert.equal(after.quantity, 0);
+  assert.equal(after.status, 'soldOut');
+});
+
+test('walk-in: another center\'s lot, a withdrawn lot and an expired lot are refused', async () => {
+  const mine = await makeCenter('walk-a');
+  const other = await makeCenter('walk-b');
+  const theirs = await makeLot(other);
+  assert.equal((await walkIn(mine, [{ surplusLotId: theirs.id, quantity: 1 }])).status, 404);
+  assert.equal((await walkIn(mine, [{ surplusLotId: 'lot-nope', quantity: 1 }])).status, 404);
+
+  const gone = await makeLot(mine);
+  await call('POST', `/v1/operator/surplus/${gone.id}/withdraw`, { device: mine.device });
+  const withdrawn = await walkIn(mine, [{ surplusLotId: gone.id, quantity: 1 }]);
+  assert.equal(withdrawn.status, 409);
+  assert.match(errorText(withdrawn), /no longer on sale/);
+
+  const old = await makeLot(mine);
+  await db.query('UPDATE surplus_lot SET best_before = CURRENT_DATE - 3 WHERE id = $1', [old.id]);
+  const expired = await walkIn(mine, [{ surplusLotId: old.id, quantity: 1 }]);
+  assert.equal(expired.status, 409);
+  assert.match(errorText(expired), /past its best-before date/);
+});
+
+test('walk-in: a counter sale and an online reservation racing for the last unit cannot both win', async () => {
+  const c = await makeCenter('walk-race');
+  const lot = await makeLot(c, { quantity: 1 });
+  const [counter, online] = await Promise.all([walkIn(c, [{ surplusLotId: lot.id, quantity: 1 }]), buy(lot.id, 1, { device: 'racer' })]);
+  assert.equal([counter, online].filter((r) => r.status === 201).length, 1, JSON.stringify([counter.status, online.status]));
+  const after = await lotOf(c, lot.id);
+  assert.ok(after.quantity - after.reserved >= 0);
+});

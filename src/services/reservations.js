@@ -141,4 +141,31 @@ const deductWalkIn = async (c, centerId, lines) => {
   }
 };
 
-module.exports = { tryReserve, reserveLots, releaseOrderStock, consumeOrderStock, deductWalkIn };
+// A walk-in sale of surplus units: they leave the lot now, but only what no app
+// order is holding. Same guard as reserving, so it cannot race an online buyer.
+const deductWalkInLots = async (c, centerId, lines) => {
+  for (const { surplusLotId, productName, quantity } of byLot(lines)) {
+    const { rowCount } = await c.query(
+      `UPDATE surplus_lot SET quantity = quantity - $3
+        WHERE id = $1 AND center_id = $2 AND status = 'active' AND quantity - reserved >= $3
+          AND (best_before IS NULL OR best_before >= ${TODAY})`,
+      [surplusLotId, centerId, quantity],
+    );
+    if (rowCount) continue;
+    const { rows } = await c.query(
+      `SELECT quantity - reserved AS free, reserved, status,
+              (best_before IS NOT NULL AND best_before < ${TODAY}) AS past FROM surplus_lot WHERE id = $1 AND center_id = $2`,
+      [surplusLotId, centerId],
+    );
+    if (!rows.length) throw new HttpError(404, 'Surplus lot not found');
+    const lot = rows[0];
+    if (lot.status !== 'active') throw new HttpError(409, `The surplus offer for ${productName} is no longer on sale`);
+    if (lot.past) throw new HttpError(409, `The surplus offer for ${productName} is past its best-before date`);
+    throw new HttpError(
+      409,
+      `Only ${lot.free} of the surplus ${productName} available` + (lot.reserved ? ` (${lot.reserved} more reserved for app orders)` : '') + `, you asked for ${quantity}`,
+    );
+  }
+};
+
+module.exports = { tryReserve, reserveLots, releaseOrderStock, consumeOrderStock, deductWalkIn, deductWalkInLots };
