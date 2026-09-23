@@ -12,6 +12,7 @@ module.exports = (db) => {
   router.get('/posts/:id', ah(c.getPost));
   router.post('/posts/:id/comments', ah(c.addComment));
   router.post('/posts/:id/like', ah(c.toggleLike));
+  router.patch('/comments/:id', ah(c.editComment));
   router.patch('/comments/:id/verify', ah(c.verifyComment));
 
   return router;

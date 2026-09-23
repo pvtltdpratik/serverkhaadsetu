@@ -68,7 +68,10 @@ Scans are forwarded to the external Soil Sense analyzer at `SOIL_ANALYZER_URL` (
 | POST | `/v1/community/posts` | `{title, content, cropTag?, districtTag?, problemTypeTag}` |
 | GET | `/v1/community/posts/:id` | post + all its comments |
 | POST | `/v1/community/posts/:id/comments` | `{content, agronomistId?}` — farmer, or an agronomist answering directly |
+| PATCH | `/v1/community/comments/:id` | `{agronomistId, content}` — agronomist edits an AI draft's wording before verifying it |
 | PATCH | `/v1/community/comments/:id/verify` | `{agronomistId}` — attaches agronomist sign-off to an AI-generated comment |
+
+Every new post also gets a draft AI answer as its first comment automatically (`src/services/aiAnswerService.js` — a placeholder today, isolated so a real model can be plugged in later without touching anything else).
 | POST | `/v1/community/posts/:id/like` | toggle — likes if not liked, unlikes if it is |
 
 See `API.md` for the full request/response shapes.

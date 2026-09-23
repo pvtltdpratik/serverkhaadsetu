@@ -51,6 +51,16 @@ module.exports = (db) => ({
     res.status(201).json(comment);
   },
 
+  editComment: async (req, res) => {
+    const input = body(req);
+    const comment = await community.editAiComment(db, {
+      commentId: req.params.id,
+      agronomistId: str(input.agronomistId, 'agronomistId', { max: 100 }),
+      content: str(input.content, 'content', { min: 2, max: 3000 }),
+    });
+    res.json(comment);
+  },
+
   verifyComment: async (req, res) => {
     const input = body(req);
     const comment = await community.verifyComment(db, {

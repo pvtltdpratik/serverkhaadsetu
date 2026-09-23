@@ -295,14 +295,21 @@ Farmers post questions or success stories, other farmers and agronomists answer,
 ```
 - An ordinary farmer comment: `isAiGenerated: false`, `agronomistId: null`.
 - An agronomist answering directly (`POST .../comments` with `agronomistId`): stored as `isAgronomistVerified: true` immediately — an agronomist's own words don't need separate sign-off. `farmerName` also resolves to the agronomist's name in this case (there is no profile row for an agronomist id).
-- An AI-generated draft (Phase 2): `isAiGenerated: true`, `isAgronomistVerified: false` until `PATCH .../verify` attaches a verified agronomist to it.
+- An AI-generated draft: `isAiGenerated: true`, `isAgronomistVerified: false` until `PATCH .../verify` attaches a verified agronomist to it. **Every new post gets exactly one of these automatically** — see below.
+
+### AI draft answers
+
+Every `POST /v1/community/posts` inserts a draft AI answer as the post's first comment, in the same transaction as the post itself (`farmerId: "ai-assistant"`, `isAiGenerated: true`, `isAgronomistVerified: false`). The draft's text always ends with a plain-language disclaimer that it is unreviewed. Generation is a placeholder (`src/services/aiAnswerService.js`, a pure `generateDraftAnswer({...}) -> string` with no DB or network access) — swapping in a real model later only changes what's inside that function.
+
+An agronomist can clean up the wording before verifying it:
 
 | Endpoint | Notes |
 |---|---|
 | `GET /v1/community/posts` | newest first. Filters: `crop`, `district` (case-insensitive exact), `problemType` (enum), `q` (title/content search). Paginated (`limit`/`offset`, `X-Total-Count`) |
-| `POST /v1/community/posts` | body `{title(5-150), content(5-3000), cropTag?, districtTag?, problemTypeTag}` -> `201` post. `farmerId` is the caller |
+| `POST /v1/community/posts` | body `{title(5-150), content(5-3000), cropTag?, districtTag?, problemTypeTag}` -> `201` post. `farmerId` is the caller. Also inserts the AI draft comment |
 | `GET /v1/community/posts/:id` | one post with all its comments (oldest first) as `comments: [...]`; `404` |
 | `POST /v1/community/posts/:id/comments` | body `{content(2-3000), agronomistId?}` -> `201` comment. `agronomistId`, if given, must be a verified agronomist (`404`/`403`) |
+| `PATCH /v1/community/comments/:id` | body `{agronomistId, content}` -> `200` comment with the new wording. Does **not** verify it. `409` if the comment isn't AI-generated, `404`/`403` for an unverified/unknown agronomist |
 | `PATCH /v1/community/comments/:id/verify` | body `{agronomistId}` (must be verified) -> `200` comment with `isAgronomistVerified: true`. `409` if the comment isn't AI-generated |
 | `POST /v1/community/posts/:id/like` | **toggle** — likes if not already liked, unlikes if it is. `200 {"liked": bool, "likeCount": n}` |
 

@@ -75,7 +75,7 @@ test('create: validation, farmerId from the caller, and farmerName resolved from
   assert.equal(created.status, 201);
   assert.equal(created.json.farmerId, 'author-1');
   assert.equal(created.json.farmerName, 'Kiran Bhosale');
-  assert.equal(created.json.commentCount, 0);
+  assert.equal(created.json.commentCount, 1); // the automatic AI draft — see the dedicated test below
   assert.equal(created.json.likeCount, 0);
 
   // A farmer who never saved a profile still gets a post, with the default name.
@@ -172,4 +172,56 @@ test('concurrent likes from different farmers land on an exact count, and same-f
   assert.ok(finalCount === before + 15 || finalCount === before + 16);
   const rows = (await db.query("SELECT count(*)::int AS n FROM post_like WHERE post_id = 'post-6' AND farmer_id = 'race-same'")).rows[0].n;
   assert.equal(rows, finalCount - (before + 15));
+});
+
+test('AI draft: every new post gets one unverified, AI-generated comment automatically', async () => {
+  const pest = await call('POST', '/v1/community/posts', {
+    body: { title: 'Small holes appearing in my okra leaves', content: 'Started this week, spreading fast.', cropTag: 'Okra', problemTypeTag: 'pest' },
+  });
+  const detail = await call('GET', `/v1/community/posts/${pest.json.postId}`);
+  assert.equal(detail.json.comments.length, 1);
+  const draft = detail.json.comments[0];
+  assert.equal(draft.isAiGenerated, true);
+  assert.equal(draft.isAgronomistVerified, false);
+  assert.equal(draft.agronomistId, null);
+  assert.match(draft.content, /neem/i); // the pest-specific template
+  assert.match(draft.content, /AI-generated draft/i); // the disclaimer
+
+  // A different problemTypeTag produces different template text.
+  const market = await call('POST', '/v1/community/posts', {
+    body: { title: 'Soybean prices this week', content: 'What are people seeing at the mandi?', problemTypeTag: 'market' },
+  });
+  const marketDraft = (await call('GET', `/v1/community/posts/${market.json.postId}`)).json.comments[0];
+  assert.match(marketDraft.content, /mandi/i);
+  assert.notEqual(marketDraft.content, draft.content);
+});
+
+test('editing an AI answer: only before/without verifying it changes its status, only a verified agronomist can do it', async () => {
+  const created = await call('POST', '/v1/community/posts', {
+    body: { title: 'White spots on my grape leaves', content: 'First time seeing this.', cropTag: 'Grapes', problemTypeTag: 'disease' },
+  });
+  const draftId = (await call('GET', `/v1/community/posts/${created.json.postId}`)).json.comments[0].commentId;
+
+  // Only an AI-generated comment can be edited this way.
+  const plain = await call('POST', `/v1/community/posts/${created.json.postId}/comments`, { body: { content: 'I saw this on my vines too last year.' } });
+  const notAi = await call('PATCH', `/v1/community/comments/${plain.json.commentId}`, { body: { agronomistId: 'agro-sanjay', content: 'edited' } });
+  assert.equal(notAi.status, 409);
+
+  // A fake agronomist cannot edit it.
+  const fakeEdit = await call('PATCH', `/v1/community/comments/${draftId}`, { body: { agronomistId: 'agro-does-not-exist', content: 'edited' } });
+  assert.equal(fakeEdit.status, 404);
+
+  // A real, verified agronomist can — and it does not auto-verify.
+  const edited = await call('PATCH', `/v1/community/comments/${draftId}`, {
+    body: { agronomistId: 'agro-sanjay', content: 'Powdery mildew is common on grapes after humid spells — a sulfur-based spray works well if caught early.' },
+  });
+  assert.equal(edited.status, 200);
+  assert.equal(edited.json.content, 'Powdery mildew is common on grapes after humid spells — a sulfur-based spray works well if caught early.');
+  assert.equal(edited.json.isAgronomistVerified, false);
+
+  // Verifying afterward still works normally.
+  const verified = await call('PATCH', `/v1/community/comments/${draftId}/verify`, { body: { agronomistId: 'agro-sanjay' } });
+  assert.equal(verified.status, 200);
+  assert.equal(verified.json.isAgronomistVerified, true);
+  assert.equal(verified.json.content, edited.json.content); // verifying doesn't touch the wording
 });

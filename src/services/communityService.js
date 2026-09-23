@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { HttpError } = require('../utils/http');
+const { generateDraftAnswer } = require('./aiAnswerService');
 
 const PROBLEM_TYPES = ['pest', 'disease', 'nutrientDeficiency', 'weather', 'market', 'general'];
 
@@ -42,12 +43,22 @@ const findVerifiedAgronomist = async (q, id) => {
 const commentsForPost = async (q, postId) =>
   (await q.query(`SELECT ${COMMENT_COLUMNS} FROM ${COMMENT_FROM} WHERE c.post_id = $1 ORDER BY c.created_at, c.comment_id`, [postId])).rows;
 
+// Every new post gets a draft AI answer as its first comment, in the same
+// transaction as the post itself — a post never exists without one. The
+// generator is synchronous and can't fail today; if it is ever swapped for a
+// real network-calling model, whether a draft failure should still let the
+// post through (rather than failing the whole request) is worth revisiting
+// then — right now failing together is the simpler, safer default.
 const createPost = async (db, { farmerId, title, content, cropTag, districtTag, problemTypeTag }) => {
   const id = newPostId();
-  await db.query(
-    'INSERT INTO community_post (post_id, farmer_id, title, content, crop_tag, district_tag, problem_type_tag) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-    [id, farmerId, title, content, cropTag, districtTag, problemTypeTag],
-  );
+  await db.tx(async (c) => {
+    await c.query(
+      'INSERT INTO community_post (post_id, farmer_id, title, content, crop_tag, district_tag, problem_type_tag) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+      [id, farmerId, title, content, cropTag, districtTag, problemTypeTag],
+    );
+    const draft = generateDraftAnswer({ title, content, cropTag, districtTag, problemTypeTag });
+    await addAiComment(c, { postId: id, content: draft });
+  });
   return findPost(db, id);
 };
 
@@ -74,6 +85,18 @@ const addAiComment = async (db, { postId, content }) => {
     [id, postId, content],
   );
   return findComment(db, id);
+};
+
+// An agronomist can clean up the AI draft's wording before verifying it.
+// Editing does not itself verify — that is still the separate call below.
+const editAiComment = async (db, { commentId, agronomistId, content }) => {
+  return db.tx(async (c) => {
+    const comment = await findComment(c, commentId);
+    if (!comment.isAiGenerated) throw new HttpError(409, 'Only an AI-generated answer can be edited this way');
+    await findVerifiedAgronomist(c, agronomistId);
+    await c.query('UPDATE post_comment SET content = $2 WHERE comment_id = $1', [commentId, content]);
+    return findComment(c, commentId);
+  });
 };
 
 const verifyComment = async (db, { commentId, agronomistId }) => {
@@ -121,6 +144,7 @@ module.exports = {
   createPost,
   addComment,
   addAiComment,
+  editAiComment,
   verifyComment,
   toggleLike,
 };
