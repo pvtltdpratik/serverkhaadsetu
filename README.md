@@ -98,6 +98,11 @@ See `API.md` for the full request/response shapes.
 | GET | `/inventory/items` | includes `isLowStock` |
 | GET / POST | `/inventory/restock-requests` | POST `{itemId, quantity}` |
 | GET | `/earnings/commission-rate`, `/earnings/summary` | commission on completed orders |
+| GET / POST | `/surplus` | discounted second-hand / near-expiry lots, kept apart from the shelf. POST `{productId, quantity, unitPrice, condition, bestBefore?, note?, fromShelf?}`; the price must be below the catalog price |
+| PATCH | `/surplus/:id` | `{unitPrice?, note?}` |
+| POST | `/surplus/:id/withdraw` | takes the lot off sale; shelf-sourced units go back |
+
+Farmers find lots with `POST /v1/centers/surplus` and reserve them by putting `{surplusLotId, quantity}` in an order line; a walk-in line can name a `surplusLotId` too. Admins see and withdraw lots under `/v1/admin/surplus`. See `API.md` for the details.
 
 ## Deploying on EC2
 
@@ -106,6 +111,12 @@ See `API.md` for the full request/response shapes.
 - **Nginx must allow photo uploads** — its default body limit is 1 MB. Add `client_max_body_size 10m;` inside the `server { }` block.
 - State lives in Postgres, so several instances can run behind the load balancer. Migrations take an advisory lock, so they are safe to run on every instance's start.
 
+## Before deploying this version
+
+- Set `SUPER_ADMIN_EMAILS` (comma-separated) or nobody can use `/v1/admin`. Roles are decided by the server: an operator is whoever owns a village center, an admin is whoever is on that list.
+- Migrations `003` (multi-center inventory) and `007` (drops the old `farmers` table) are **destructive**: they remove the old single-shop inventory and demo orders. Back up first if you have data you care about.
+- Migrations run automatically when the server starts.
+
 ## Not built yet
 
-Farmers sign in through Supabase (see `API.md`), but there are no farmer/operator roles yet: any signed-in user can call the operator API. Add roles before exposing the operator endpoints publicly with real data.
+Push or WhatsApp delivery of notifications (they are in-app only), ratings and pickup-wait history for the center score, and a pin-on-map location picker.
