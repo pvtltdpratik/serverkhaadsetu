@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { HttpError } = require('../utils/http');
+const { checkLowStock, rearmLowStock } = require('./stockAlerts');
 
 const CENTER_COLUMNS = `c.center_id AS "centerId", c.name, c.village, c.district, c.latitude, c.longitude,
   c.operator_id AS "operatorId", c.operator_name AS "operatorName", c.phone, c.is_open AS "isOpen",
@@ -118,23 +119,40 @@ const upsertUser = async (db, { userId, email, name, requestedRole }) => {
 // Adds stock to a center's shelf (creating the row the first time). A single
 // statement, so concurrent receipts add up exactly. Arriving stock also
 // clears the same amount from "incoming".
-const receiveStock = async (db, { centerId, productId, quantity }) => {
+//
+// `expectedQuantity`, when given and different from what arrived, records a
+// discrepancy for the platform's supply team to review. The shelf always gets
+// what was actually counted.
+const receiveStock = async (db, { centerId, productId, quantity, expectedQuantity, note }) => {
   const product = (await db.query('SELECT 1 FROM products WHERE id = $1', [productId])).rows.length;
   if (!product) throw new HttpError(404, 'Product not found');
+  const mismatch = expectedQuantity !== undefined && expectedQuantity !== quantity;
+  let discrepancyId = null;
   try {
-    await db.query(
-      `INSERT INTO center_inventory (center_id, product_id, on_hand, last_restocked_at) VALUES ($1,$2,$3, now())
-       ON CONFLICT (center_id, product_id) DO UPDATE SET
-         on_hand = center_inventory.on_hand + EXCLUDED.on_hand,
-         incoming = GREATEST(center_inventory.incoming - EXCLUDED.on_hand, 0),
-         last_restocked_at = now()`,
-      [centerId, productId, quantity],
-    );
+    await inTx(db, async (c) => {
+      await c.query(
+        `INSERT INTO center_inventory (center_id, product_id, on_hand, last_restocked_at) VALUES ($1,$2,$3, now())
+         ON CONFLICT (center_id, product_id) DO UPDATE SET
+           on_hand = center_inventory.on_hand + EXCLUDED.on_hand,
+           incoming = GREATEST(center_inventory.incoming - EXCLUDED.on_hand, 0),
+           last_restocked_at = now()`,
+        [centerId, productId, quantity],
+      );
+      await rearmLowStock(c, centerId, [productId]);
+      if (mismatch) {
+        discrepancyId = `disc-${crypto.randomUUID()}`;
+        await c.query(
+          'INSERT INTO stock_discrepancy (id, center_id, product_id, expected_quantity, received_quantity, note) VALUES ($1,$2,$3,$4,$5,$6)',
+          [discrepancyId, centerId, productId, expectedQuantity, quantity, note || ''],
+        );
+      }
+    });
   } catch (err) {
     if (err.code === '23514') throw new HttpError(409, 'That would exceed this center\'s storage capacity for the product');
     throw err;
   }
-  return inventoryItem(db, centerId, productId);
+  const item = await inventoryItem(db, centerId, productId);
+  return discrepancyId ? { ...item, discrepancy: { id: discrepancyId, expected: expectedQuantity, received: quantity } } : item;
 };
 
 const inventoryItem = async (q, centerId, productId) => {
@@ -153,9 +171,14 @@ const updateInventorySettings = async (db, { centerId, productId, reorderLevel, 
   if (maxCapacity !== undefined) { params.push(maxCapacity); sets.push(`max_capacity = $${params.length}`); }
   if (!sets.length) throw new HttpError(400, 'Nothing to update');
   try {
-    const { rowCount } = await db.query(
-      `UPDATE center_inventory SET ${sets.join(', ')} WHERE center_id = $1 AND product_id = $2`, params);
-    if (!rowCount) throw new HttpError(404, 'This center does not stock that product');
+    await inTx(db, async (c) => {
+      const { rowCount } = await c.query(
+        `UPDATE center_inventory SET ${sets.join(', ')} WHERE center_id = $1 AND product_id = $2`, params);
+      if (!rowCount) throw new HttpError(404, 'This center does not stock that product');
+      // A changed reorder level can put a product on either side of the line.
+      await rearmLowStock(c, centerId, [productId]);
+      await checkLowStock(c, centerId, [productId]);
+    });
   } catch (err) {
     if (err.code === '23514') throw new HttpError(409, 'Capacity cannot be lower than the stock currently on hand');
     throw err;

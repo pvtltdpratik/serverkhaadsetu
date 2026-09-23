@@ -47,7 +47,7 @@ const userSummary = async (db, adminEmails) => {
 
 const overview = async (db, adminEmails, now = new Date()) => {
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const [people, centers, orders, restock, lowStock] = await Promise.all([
+  const [people, centers, orders, restock, lowStock, unattended, discrepancies] = await Promise.all([
     userSummary(db, adminEmails),
     db.one(
       `SELECT count(*) FILTER (WHERE status = 'active')::int AS active,
@@ -62,8 +62,15 @@ const overview = async (db, adminEmails, now = new Date()) => {
          FROM orders`, [startOfDay]),
     db.one("SELECT count(*)::int AS pending FROM restock_requests WHERE status = 'pending'"),
     db.one('SELECT count(*)::int AS n FROM center_inventory WHERE on_hand - reserved <= reorder_level'),
+    // Still low a full day after the operator was told: nobody has acted.
+    db.one(`SELECT count(*)::int AS n FROM center_inventory
+             WHERE on_hand - reserved <= reorder_level AND low_stock_alerted_at <= $1`, [new Date(now.getTime() - 24 * 60 * 60 * 1000)]),
+    db.one("SELECT count(*)::int AS n FROM stock_discrepancy WHERE status = 'open'"),
   ]);
-  return { people, centers, orders, restockRequests: restock, lowStockItems: lowStock.n };
+  return {
+    people, centers, orders, restockRequests: restock,
+    lowStockItems: lowStock.n, lowStockUnattended: unattended.n, discrepanciesOpen: discrepancies.n,
+  };
 };
 
 const findUserRow = async (db, userId, adminEmails) => {

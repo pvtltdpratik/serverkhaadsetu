@@ -253,6 +253,48 @@ module.exports = (db, roles) => {
     res.json({ id: request.id, status: to });
   }));
 
+  // ---- Stock discrepancies (delivery did not match what was expected) ----
+  router.get('/discrepancies', ah(async (req, res) => {
+    const where = [];
+    const params = [];
+    if (req.query.status) {
+      params.push(oneOf(req.query.status, 'status', ['open', 'resolved']));
+      where.push(`d.status = $${params.length}`);
+    }
+    await sendPaged(req, res, db, {
+      select: `d.id, d.center_id AS "centerId", c.name AS "centerName", d.product_id AS "productId", p.name AS "productName",
+               d.expected_quantity AS "expectedQuantity", d.received_quantity AS "receivedQuantity", d.note, d.status,
+               d.resolution_note AS "resolutionNote", d.created_at AS "createdAt", d.resolved_at AS "resolvedAt"`,
+      from: `stock_discrepancy d JOIN village_center c ON c.center_id = d.center_id JOIN products p ON p.id = d.product_id${where.length ? ` WHERE ${where.join(' AND ')}` : ''}`,
+      params,
+      order: 'd.created_at DESC, d.id',
+    });
+  }));
+
+  router.patch('/discrepancies/:id', ah(async (req, res) => {
+    const input = body(req);
+    const note = str(input.note, 'note', { max: 300, optional: true }) || '';
+    await db.tx(async (c) => {
+      const { rows } = await c.query(
+        `UPDATE stock_discrepancy SET status = 'resolved', resolution_note = $2, resolved_at = now()
+          WHERE id = $1 AND status = 'open' RETURNING center_id, product_id`, [req.params.id, note]);
+      if (!rows.length) {
+        const exists = (await c.query('SELECT status FROM stock_discrepancy WHERE id = $1', [req.params.id])).rows[0];
+        throw new HttpError(exists ? 409 : 404, exists ? 'That discrepancy is already resolved' : 'Discrepancy not found');
+      }
+      const operator = (await c.query('SELECT operator_id FROM village_center WHERE center_id = $1', [rows[0].center_id])).rows[0];
+      if (operator) {
+        await notify(c, operator.operator_id, {
+          type: 'stock', title: 'Delivery discrepancy reviewed',
+          body: note ? `The supply team reviewed your report: ${note}` : 'The supply team has reviewed your delivery report.',
+          refId: req.params.id,
+        });
+      }
+      await recordAudit(c, req, { action: 'discrepancy.resolve', targetType: 'discrepancy', targetId: req.params.id, details: { centerId: rows[0].center_id, productId: rows[0].product_id, note } });
+    });
+    res.json({ id: req.params.id, status: 'resolved' });
+  }));
+
   // ---- Audit log ----
   router.get('/audit', ah(async (req, res) => {
     const where = [];

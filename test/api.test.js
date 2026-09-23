@@ -272,7 +272,10 @@ test('orders: farmer places, operator fulfils with OTP', async () => {
 test('operator: orders, walk-in sale, inventory, restock, earnings (scoped to my center)', async () => {
   // Nothing is seeded for a new center.
   assert.deepEqual((await call('GET', '/v1/operator/orders?type=walkIn')).json, []);
-  assert.deepEqual((await call('GET', '/v1/operator/farmers')).json, []);
+  // Farmers are the real customers who ordered here (the earlier tests placed some).
+  const farmers = (await call('GET', '/v1/operator/farmers')).json;
+  assert.ok(farmers.length >= 1);
+  assert.ok(farmers.every((f) => f.ordersCount >= 1 && typeof f.name === 'string' && f.needsFollowUp === false));
   assert.equal((await call('GET', '/v1/operator/farmers/nope')).status, 404);
 
   const orders = await call('GET', '/v1/operator/orders');

@@ -204,7 +204,7 @@ The bell on the home screen. Notifications are created by the server when someth
   "read": false
 }
 ```
-`type` is one of `scan`, `scheme`, `order`. Order notifications carry the pickup code in the body (it is the farmer's own code).
+`type` is one of `scan`, `scheme`, `order`, and for accounts that get them: `stock` (an operator's low-stock alert, or a reviewed delivery report), `restock` (a restock approved/delivered), `account` (suspended/reactivated). Clients should treat an unknown type as generic rather than failing. Order notifications carry the pickup code in the body (it is the farmer's own code).
 
 | Endpoint | Notes |
 |---|---|
@@ -363,7 +363,7 @@ Call after sign-in. Records the account and returns `{userId, email, name, reque
 ### Admin panel API - `/v1/admin/...`
 Everything here needs an administrator (`403` otherwise), and every change is written to the audit log in the same transaction (a failed change leaves no entry).
 
-**Overview** - `GET /overview` -> `{people:{operators:{active,suspended,unassigned,total}, farmers:{active,suspended,total}}, centers:{active,suspended,withoutOperator,total}, orders:{pending,readyForPickup,today}, restockRequests:{pending}, lowStockItems}`.
+**Overview** - `GET /overview` -> `{people:{operators:{active,suspended,unassigned,total}, farmers:{active,suspended,total}}, centers:{active,suspended,withoutOperator,total}, orders:{pending,readyForPickup,today}, restockRequests:{pending}, lowStockItems, lowStockUnattended, discrepanciesOpen}`. `lowStockUnattended` counts products still low a full day after the operator was alerted (nobody has acted); `discrepanciesOpen` counts unreviewed delivery reports.
 
 **People, categorised.** Everyone who has signed in is a `role` (`operator` = owns a center or asked to be one; `farmer`) in a `segment`: `active`, `suspended` (the account, or for an operator their center, is suspended) or `unassigned` (an operator with no center yet). Administrators (`SUPER_ADMIN_EMAILS`) are not listed.
 - `GET /users/summary` -> `{operators:{active,suspended,unassigned,total}, farmers:{active,suspended,total}}`.
@@ -381,6 +381,8 @@ Everything here needs an administrator (`403` otherwise), and every change is wr
 **Orders** - `GET /orders` across every center: filters `status`, `type`, `centerId`, `q` (customer name); each has `centerName`; pickup codes are never included.
 
 **Restock requests (supply chain)** - `GET /restock-requests` (filters `status`, `centerId`), `PATCH /restock-requests/:id` `{status:"approved"|"fulfilled"}`. Flow is `pending -> approved -> fulfilled`; anything else is `409`. **Approving adds the quantity to the center's `incoming`**; the operator is notified; the stock itself is added when the operator confirms receipt (`POST /operator/inventory/receive`), which clears `incoming`.
+
+**Delivery discrepancies** - `GET /discrepancies` (filter `status=open|resolved`; each has `centerName, productName, expectedQuantity, receivedQuantity, note, status, resolutionNote`), `PATCH /discrepancies/:id` `{note?}` marks it resolved (`409` if already, `404` unknown) and tells the operator. Audit action `discrepancy.resolve`.
 
 **Audit log** - `GET /audit` (filters `targetType`, `targetId`; newest first): `{id, adminId, adminEmail, action, targetType, targetId, details, createdAt}`. Actions: `center.create|update|suspend|reactivate|assignOperator|unassignOperator`, `user.suspend|reactivate`, `restock.approved|fulfilled`.
 
@@ -421,8 +423,9 @@ All routes need the caller to own an **active** center (`403` otherwise) and onl
 No device id. Single shared dataset.
 
 ### Farmers
-- `GET /v1/operator/farmers` - filters `needsFollowUp=true|false`, `q` (name/village/crop).
-- `GET /v1/operator/farmers/:id` - `404` if unknown.
+The list is built from the real customers who have an app order at this center (cancelled orders don't count; walk-ins have no account): `{id (the farmer's user id), name (profile name, else the name on the order), village, phone:"", activeCrop:"", notes:"", lastVisitDate (last order), ordersCount, needsFollowUp (no order for 30 days)}`, newest first.
+- `GET /v1/operator/farmers` - filters `needsFollowUp=true|false`, `q` (name/village); paged.
+- `GET /v1/operator/farmers/:id` - `404` if that farmer has not ordered at this center.
 
 `Farmer`:
 ```json
@@ -462,7 +465,8 @@ Nothing is seeded: a new center starts with no orders, farmers or stock. Orders 
 
 ### Inventory
 - Stock is per center and per product: `on_hand`, `reserved`, `reorderLevel`, `maxCapacity`, `incoming`. **`available = currentStock - reserved`** is what farmers may be promised. The database refuses `reserved > on hand` and `on hand > capacity`.
-- `POST /v1/operator/inventory/receive` - `{productId, quantity}` adds stock (creates the shelf row the first time), clears the same amount from `incoming`, stamps `lastRestockedAt` -> `201` item. `404` unknown product, `409` over capacity.
+- **Low-stock alerts.** When a product's *available* stock first falls to its reorder level the operator gets one `stock` notification ("Low stock: Neem Cake", or "Out of stock: ..." at zero); it alerts again only after the product has recovered above the level (restock, cancelled order, lower/higher reorder level). Triggered by app orders, walk-in sales and reorder-level changes.
+- `POST /v1/operator/inventory/receive` - `{productId, quantity, expectedQuantity?, note?}` adds stock (creates the shelf row the first time), clears the same amount from `incoming`, stamps `lastRestockedAt` -> `201` item. `404` unknown product, `409` over capacity. If `expectedQuantity` is given and differs from `quantity`, a delivery discrepancy is recorded for the supply team and the response has `discrepancy:{id,expected,received}`; the shelf always gets the `quantity` actually counted.
 - `PATCH /v1/operator/inventory/items/:productId` - `{reorderLevel?, maxCapacity?}` (`maxCapacity:null` removes the limit); `404` if the center doesn't stock it, `409` if capacity < on hand.
 - `GET /v1/operator/inventory/items` -> only products this center stocks. `id` is the product id; each item is the old `InventoryItem` plus `reserved`, `available`, `maxCapacity`, `incoming`, `lastRestockedAt`; `isLowStock` now means *available* <= reorder level:
   `{ "id":"inv-neemcake","name":"Neem Cake","unit":"bag","unitPrice":600,"currentStock":5,"lowStockThreshold":8,"isLowStock":true }`

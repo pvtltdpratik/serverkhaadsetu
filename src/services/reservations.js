@@ -1,4 +1,5 @@
 const { HttpError } = require('../utils/http');
+const { rearmLowStock } = require('./stockAlerts');
 
 // Stock-holding primitives. All of them take `c`, a transaction client, so a
 // hold changes atomically with the order that owns it.
@@ -47,6 +48,8 @@ const releaseOrderStock = async (c, order) => {
     );
   }
   await c.query('UPDATE orders SET stock_reserved = false WHERE id = $1', [order.id]);
+  // More is available again, so a product that had dipped can alert on its next dip.
+  await rearmLowStock(c, order.centerId, heldLines(order).map((i) => i.productId));
 };
 
 // The farmer collected the order: the goods leave the shelf, so on hand and

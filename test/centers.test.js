@@ -75,7 +75,7 @@ test.after(async () => {
 
 test('nothing is seeded: no centers, and the operator-side tables start empty', async () => {
   assert.deepEqual((await call('GET', '/v1/admin/centers', { as: admin })).json, []);
-  for (const table of ['center_inventory', 'restock_requests', 'farmers']) {
+  for (const table of ['center_inventory', 'restock_requests']) {
     assert.equal((await db.one(`SELECT count(*)::int AS n FROM ${table}`)).n, 0, table);
   }
 });
@@ -287,7 +287,8 @@ test('migration 003 keeps real farmer orders and drops only the demo data', asyn
 
     assert.deepEqual((await legacy.rows('SELECT id, center_id FROM orders')).map((o) => [o.id, o.center_id]), [['order-real', null]]);
     assert.equal((await legacy.one('SELECT count(*)::int AS n FROM order_items')).n, 1);
-    assert.equal((await legacy.one('SELECT count(*)::int AS n FROM farmers')).n, 0);
+    // The hand-entered farmers table (and its demo rows) is gone; the operator's list is built from orders.
+    assert.equal((await legacy.one("SELECT to_regclass('farmers') IS NULL AS gone")).gone, true);
     assert.equal((await legacy.one('SELECT count(*)::int AS n FROM village_center')).n, 0);
   } finally {
     await legacy.dropSchema();

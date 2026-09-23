@@ -6,13 +6,12 @@ const { otpLimiter } = require('../middleware/security');
 const { notify } = require('../services/notifications');
 const centers = require('../services/centerService');
 const { deductWalkIn, consumeOrderStock } = require('../services/reservations');
+const { checkLowStock } = require('../services/stockAlerts');
 const config = require('../config');
 
 const ORDER_STATUSES = ['pending', 'readyForPickup', 'completed', 'cancelled'];
 const ORDER_TYPES = ['appOrder', 'walkIn'];
 
-const FARMER_COLUMNS = `id, name, village, phone, active_crop AS "activeCrop", last_visit_date AS "lastVisitDate",
-  needs_follow_up AS "needsFollowUp", notes`;
 const RESTOCK_COLUMNS = `r.id, r.product_id AS "itemId", p.name AS "itemName", r.requested_quantity AS "requestedQuantity",
   r.status, r.requested_date AS "requestedDate"`;
 
@@ -54,27 +53,42 @@ module.exports = (db, roles) => {
   }));
 
   // ---- Farmers ----
+  // Built from the real customers who have ordered at this center: each farmer
+  // with an app order (cancelled ones don't count), their last order, and how
+  // many they have placed. `needsFollowUp` means no order for 30 days.
+  const FARMERS_FROM = `(
+    SELECT o.owner_id AS id,
+           COALESCE(NULLIF(p.name, ''), (array_agg(o.customer_name ORDER BY o.created_at DESC))[1]) AS name,
+           COALESCE(p.village, '') AS village,
+           '' AS phone, '' AS "activeCrop", '' AS notes,
+           max(o.created_at) AS "lastVisitDate",
+           count(*)::int AS "ordersCount",
+           (max(o.created_at) < now() - interval '30 days') AS "needsFollowUp"
+      FROM orders o LEFT JOIN profiles p ON p.owner_id = o.owner_id
+     WHERE o.center_id = $1 AND o.owner_id IS NOT NULL AND o.status <> 'cancelled'
+     GROUP BY o.owner_id, p.name, p.village) f`;
+
   router.get('/farmers', ah(async (req, res) => {
     const params = [req.center.centerId];
-    const where = ['center_id = $1'];
+    const where = [];
     if (req.query.needsFollowUp !== undefined) {
       params.push(String(req.query.needsFollowUp) === 'true');
-      where.push(`needs_follow_up = $${params.length}`);
+      where.push(`f."needsFollowUp" = $${params.length}`);
     }
     if (req.query.q) {
       params.push(likePattern(req.query.q));
-      where.push(`(name || ' ' || village || ' ' || active_crop) ILIKE $${params.length}`);
+      where.push(`(f.name || ' ' || f.village) ILIKE $${params.length}`);
     }
     await sendPaged(req, res, db, {
-      select: FARMER_COLUMNS,
-      from: `farmers WHERE ${where.join(' AND ')}`,
+      select: 'f.*',
+      from: `${FARMERS_FROM}${where.length ? ` WHERE ${where.join(' AND ')}` : ''}`,
       params,
-      order: 'seq',
+      order: 'f."lastVisitDate" DESC, f.id',
     });
   }));
 
   router.get('/farmers/:id', ah(async (req, res) => {
-    const { rows } = await db.query(`SELECT ${FARMER_COLUMNS} FROM farmers WHERE id = $1 AND center_id = $2`, [req.params.id, req.center.centerId]);
+    const { rows } = await db.query(`SELECT f.* FROM ${FARMERS_FROM} WHERE f.id = $2`, [req.center.centerId, req.params.id]);
     if (!rows.length) throw new HttpError(404, 'Farmer not found');
     res.json(rows[0]);
   }));
@@ -131,6 +145,7 @@ module.exports = (db, roles) => {
       }
       // The goods leave the shelf now, but only what is not reserved for app orders.
       await deductWalkIn(c, req.center.centerId, items);
+      await checkLowStock(c, req.center.centerId, items.map((i) => i.productId));
       const created = {
         id: newOrderId(),
         customerName: str(input.customerName, 'customerName', { max: 80, optional: true }) || 'Walk-in customer',
@@ -231,6 +246,8 @@ module.exports = (db, roles) => {
       centerId: req.center.centerId,
       productId: str(input.productId, 'productId', { max: 100 }),
       quantity: num(input.quantity, 'quantity', { min: 1, max: 100000, integer: true }),
+      expectedQuantity: input.expectedQuantity === undefined ? undefined : num(input.expectedQuantity, 'expectedQuantity', { min: 0, max: 100000, integer: true }),
+      note: str(input.note, 'note', { max: 300, optional: true }),
     });
     res.status(201).json(item);
   }));

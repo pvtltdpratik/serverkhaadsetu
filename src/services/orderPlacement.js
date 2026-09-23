@@ -3,6 +3,7 @@ const { newOrderId, newOtp, insertOrder } = require('./orders');
 const { tryReserve } = require('./reservations');
 const { findNearby } = require('./nearbyCenters');
 const { notify } = require('./notifications');
+const { checkLowStock } = require('./stockAlerts');
 const { SERVICEABLE } = require('./centerService');
 
 const RESERVATION_DAYS = 5;
@@ -68,6 +69,8 @@ const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin,
       // Re-rank now (without a lock) so the alternatives reflect what is left.
       throw new HttpError(409, message, { code: 'out_of_stock', alternatives: shortAlternatives(ranked.filter((r) => r.center.centerId !== centerId)) });
     }
+
+    await checkLowStock(c, chosen, items.map((i) => i.productId));
 
     const { rows: [center] } = await c.query(
       `SELECT center_id AS "centerId", name, village, phone, operator_id AS "operatorId" FROM village_center WHERE center_id = $1`, [chosen]);
