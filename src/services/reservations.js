@@ -1,5 +1,6 @@
 const { HttpError } = require('../utils/http');
 const { rearmLowStock } = require('./stockAlerts');
+const { TODAY } = require('./surplus');
 
 // Stock-holding primitives. All of them take `c`, a transaction client, so a
 // hold changes atomically with the order that owns it.
@@ -35,7 +36,56 @@ const tryReserve = async (c, centerId, items) => {
   return true;
 };
 
-const heldLines = (order) => order.items.filter((i) => i.productId);
+// Regular shelf lines, and (separately) lines that hold units from a surplus lot.
+const heldLines = (order) => order.items.filter((i) => i.productId && !i.surplusLotId);
+const lotLines = (order) => order.items.filter((i) => i.surplusLotId);
+const byLot = (items) => [...items].sort((a, b) => (a.surplusLotId < b.surplusLotId ? -1 : a.surplusLotId > b.surplusLotId ? 1 : 0));
+
+// Holds units from surplus lots, all or nothing (the caller's transaction rolls
+// back everything else it held). Same guarded UPDATE as the shelf: the WHERE
+// clause is the availability check, so two farmers can't both take the last unit.
+// `centerId` pins the lots to the center the order is going to.
+const reserveLots = async (c, centerId, items) => {
+  for (const { surplusLotId, quantity } of byLot(items)) {
+    const { rowCount } = await c.query(
+      `UPDATE surplus_lot SET reserved = reserved + $3
+        WHERE id = $1 AND center_id = $2 AND status = 'active' AND quantity - reserved >= $3
+          AND (best_before IS NULL OR best_before >= ${TODAY})`,
+      [surplusLotId, centerId, quantity],
+    );
+    if (!rowCount) {
+      throw new HttpError(409, 'That surplus offer just sold out or is no longer available.', { code: 'surplus_unavailable', surplusLotId });
+    }
+  }
+};
+
+// Gives a lot's held units back. If the lot has been withdrawn meanwhile, the
+// units leave it: back to the shelf when the lot was marked down from there
+// (best effort: if the shelf has since filled up they are written off rather
+// than failing the cancel or the expiry job), otherwise they simply go.
+const releaseLotUnits = async (c, items) => {
+  for (const { surplusLotId, quantity } of byLot(items)) {
+    const { rows } = await c.query(
+      `UPDATE surplus_lot SET reserved = GREATEST(reserved - $2, 0) WHERE id = $1
+        RETURNING center_id, product_id, from_shelf, status`,
+      [surplusLotId, quantity],
+    );
+    const lot = rows[0];
+    if (!lot || lot.status !== 'withdrawn') continue;
+    await c.query('UPDATE surplus_lot SET quantity = GREATEST(quantity - $2, 0) WHERE id = $1', [surplusLotId, quantity]);
+    if (!lot.from_shelf) continue;
+    await c.query('SAVEPOINT return_to_shelf');
+    try {
+      await c.query('UPDATE center_inventory SET on_hand = on_hand + $3 WHERE center_id = $1 AND product_id = $2', [lot.center_id, lot.product_id, quantity]);
+      await c.query('RELEASE SAVEPOINT return_to_shelf');
+      await rearmLowStock(c, lot.center_id, [lot.product_id]);
+    } catch (err) {
+      if (err.code !== '23514') throw err;
+      await c.query('ROLLBACK TO SAVEPOINT return_to_shelf');
+      await c.query('RELEASE SAVEPOINT return_to_shelf');
+    }
+  }
+};
 
 // Gives an order's held stock back to the shelf (cancel / expiry). A no-op for
 // orders that hold nothing, so calling it twice is harmless.
@@ -47,6 +97,7 @@ const releaseOrderStock = async (c, order) => {
       [order.centerId, productId, quantity],
     );
   }
+  await releaseLotUnits(c, lotLines(order));
   await c.query('UPDATE orders SET stock_reserved = false WHERE id = $1', [order.id]);
   // More is available again, so a product that had dipped can alert on its next dip.
   await rearmLowStock(c, order.centerId, heldLines(order).map((i) => i.productId));
@@ -62,6 +113,10 @@ const consumeOrderStock = async (c, order) => {
         WHERE center_id = $1 AND product_id = $2`,
       [order.centerId, productId, quantity],
     );
+  }
+  // Surplus units leave their lot the same way: sold, so quantity and reserved fall together.
+  for (const { surplusLotId, quantity } of byLot(lotLines(order))) {
+    await c.query('UPDATE surplus_lot SET quantity = GREATEST(quantity - $2, 0), reserved = GREATEST(reserved - $2, 0) WHERE id = $1', [surplusLotId, quantity]);
   }
   await c.query('UPDATE orders SET stock_reserved = false WHERE id = $1', [order.id]);
 };
@@ -86,4 +141,4 @@ const deductWalkIn = async (c, centerId, lines) => {
   }
 };
 
-module.exports = { tryReserve, releaseOrderStock, consumeOrderStock, deductWalkIn };
+module.exports = { tryReserve, reserveLots, releaseOrderStock, consumeOrderStock, deductWalkIn };

@@ -1,6 +1,6 @@
 const express = require('express');
 const { HttpError, asyncHandler, str, num, body, deviceId } = require('../utils/http');
-const { findNearby } = require('../services/nearbyCenters');
+const { findNearby, findNearbySurplus } = require('../services/nearbyCenters');
 const { searchVillages } = require('../data/villages');
 const { resolveOrigin } = require('../services/location');
 const config = require('../config');
@@ -61,6 +61,19 @@ module.exports = (db) => {
       radiusKm: result.radiusKm,
       centers: result.centers,
     });
+  }));
+
+  // Discounted surplus lots near the farmer, nearest first. Same location rules
+  // as /nearby. `productId` narrows to one product (e.g. from its detail page).
+  router.post('/surplus', ah(async (req, res) => {
+    const input = body(req);
+    const located = await resolveOrigin(db, deviceId(req), input);
+    if (!located) throw new HttpError(400, 'Location needed: send latitude and longitude, or a village, or set your village in your profile.');
+    const productId = str(input.productId, 'productId', { max: 100, optional: true });
+    const radiusKm = input.radiusKm === undefined ? undefined : num(input.radiusKm, 'radiusKm', { min: 1, max: 35 });
+    const limit = input.limit === undefined ? 50 : num(input.limit, 'limit', { min: 1, max: 100, integer: true });
+    const lots = await findNearbySurplus(db, { origin: located.origin, productId: productId || null, radiusKm, limit });
+    res.json({ location: { latitude: located.origin.latitude, longitude: located.origin.longitude, source: located.source }, lots });
   }));
 
   return router;

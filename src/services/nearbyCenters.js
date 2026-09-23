@@ -1,6 +1,7 @@
 const { haversineKm, boundingBox, estimateTravelMinutes } = require('./geo');
 const ranking = require('./centerRanking');
 const { SERVICEABLE } = require('./centerService');
+const { LOT_COLUMNS, LOT_FROM, LOT_LIVE, toMoney } = require('./surplus');
 
 const WIDEST_KM = ranking.RADII_KM[ranking.RADII_KM.length - 1];
 
@@ -90,4 +91,38 @@ const findNearby = async (db, { origin, items = [], homeCenterId = null, limit =
   return { radiusKm, centers };
 };
 
-module.exports = { findNearby };
+// Surplus lots a farmer can buy near `origin`, nearest first (then the deepest
+// discount). Only lots that are live right now: active, not expired, with units
+// left that no other order is holding. `productId` narrows to one product.
+const findNearbySurplus = async (db, { origin, productId = null, radiusKm = WIDEST_KM, limit = 50 }) => {
+  const km = Math.min(radiusKm, WIDEST_KM);
+  const box = boundingBox(origin, km);
+  const params = [box.minLat, box.maxLat, box.minLng, box.maxLng];
+  let productFilter = '';
+  if (productId) {
+    params.push(productId);
+    productFilter = ` AND l.product_id = $${params.length}`;
+  }
+  const { rows } = await db.query(
+    `SELECT ${LOT_COLUMNS}, c.name AS "centerName", c.village, c.district, c.phone,
+            c.latitude, c.longitude, c.is_open AS "isOpen"
+       FROM ${LOT_FROM} JOIN village_center c ON c.center_id = l.center_id
+      WHERE ${LOT_LIVE} AND ${SERVICEABLE}${productFilter}
+        AND c.latitude BETWEEN $1 AND $2 AND c.longitude BETWEEN $3 AND $4`,
+    params,
+  );
+  return rows
+    .map((row) => ({ ...row, rawKm: haversineKm(origin, row) }))
+    .filter((row) => row.rawKm <= km)
+    .sort((a, b) => a.rawKm - b.rawKm || b.catalogPrice - b.unitPrice - (a.catalogPrice - a.unitPrice))
+    .slice(0, limit)
+    .map(({ rawKm, centerName, village, district, phone, latitude, longitude, isOpen, ...lot }) => ({
+      ...toMoney(lot),
+      center: { centerId: lot.centerId, name: centerName, village, district, phone, latitude, longitude, isOpen },
+      distanceKm: ranking.round1(rawKm),
+      estimatedTravelMinutes: estimateTravelMinutes(rawKm),
+      travelTimeIsEstimate: true,
+    }));
+};
+
+module.exports = { findNearby, findNearbySurplus };

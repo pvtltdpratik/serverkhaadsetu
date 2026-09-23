@@ -1,6 +1,7 @@
 const { HttpError } = require('../utils/http');
 const { newOrderId, newOtp, insertOrder } = require('./orders');
-const { tryReserve } = require('./reservations');
+const { tryReserve, reserveLots } = require('./reservations');
+const { LOT_LIVE } = require('./surplus');
 const { findNearby } = require('./nearbyCenters');
 const { notify } = require('./notifications');
 const { checkLowStock } = require('./stockAlerts');
@@ -23,33 +24,58 @@ const shortAlternatives = (ranked) =>
 // automatic assignment they fall through to the next-ranked center, with an
 // explicit choice they get a 409 that lists the alternatives.
 //
-//   lines   [{productId, quantity}]
+//   lines   [{productId, quantity}] for regular stock, or [{surplusLotId, quantity}]
+//           for a discounted surplus lot. A surplus lot exists only at the center
+//           that listed it, so an order with one goes to that center (and any
+//           regular lines in the same cart must be available there too).
 //   origin  {latitude, longitude} of the farmer, or null
 const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin, homeCenterId, timeZone, now = new Date() }) => {
   return db.tx(async (c) => {
-    // Prices always come from the catalog; never trust a client-supplied price.
+    // Prices always come from the catalog (or the surplus lot); never trust a
+    // client-supplied price.
     const { rows: products } = await c.query(
       'SELECT id, name, price_in_rupees AS "price" FROM products WHERE id = ANY($1)',
-      [lines.map((l) => l.productId)],
+      [lines.filter((l) => !l.surplusLotId).map((l) => l.productId)],
     );
     const byId = new Map(products.map((p) => [p.id, p]));
+    const lotIds = [...new Set(lines.filter((l) => l.surplusLotId).map((l) => l.surplusLotId))];
+    const { rows: lots } = lotIds.length
+      ? await c.query(
+        `SELECT l.id, l.center_id AS "centerId", l.product_id AS "productId", l.unit_price AS "price", p.name
+           FROM surplus_lot l JOIN products p ON p.id = l.product_id WHERE l.id = ANY($1) AND ${LOT_LIVE}`, [lotIds])
+      : { rows: [] };
+    const lotById = new Map(lots.map((l) => [l.id, l]));
+
     const items = lines.map((l) => {
+      if (l.surplusLotId) {
+        const lot = lotById.get(l.surplusLotId);
+        if (!lot) throw new HttpError(409, 'That surplus offer is no longer available.', { code: 'surplus_unavailable', surplusLotId: l.surplusLotId });
+        return { productId: lot.productId, surplusLotId: lot.id, productName: lot.name, quantity: l.quantity, unitPrice: Number(lot.price) };
+      }
       const product = byId.get(l.productId);
       if (!product) throw new HttpError(404, 'Product not found');
       return { productId: product.id, productName: product.name, quantity: l.quantity, unitPrice: product.price };
     });
+    const shelfItems = items.filter((i) => !i.surplusLotId);
+    const lotItems = items.filter((i) => i.surplusLotId);
+    const lotCenters = [...new Set(lots.map((l) => l.centerId))];
+    if (lotCenters.length > 1) throw new HttpError(400, "Surplus offers from different centers can't be in one order.");
+    if (lotCenters.length && centerId && centerId !== lotCenters[0]) {
+      throw new HttpError(400, 'Surplus offers can only be collected from the center that listed them.');
+    }
 
     // What the farmer is choosing between, best first. Without a location we
     // can only honour an explicit choice.
-    const ranked = origin
-      ? (await findNearby(c, { origin, items, homeCenterId, limit: 10, timeZone, now })).centers
+    const ranked = origin && shelfItems.length
+      ? (await findNearby(c, { origin, items: shelfItems, homeCenterId, limit: 10, timeZone, now })).centers
       : [];
 
+    const pinnedCenter = lotCenters[0] || centerId;
     let candidates;
-    if (centerId) {
-      const { rows } = await c.query(`SELECT 1 FROM village_center c WHERE c.center_id = $1 AND ${SERVICEABLE}`, [centerId]);
+    if (pinnedCenter) {
+      const { rows } = await c.query(`SELECT 1 FROM village_center c WHERE c.center_id = $1 AND ${SERVICEABLE}`, [pinnedCenter]);
       if (!rows.length) throw new HttpError(404, 'Village center not found');
-      candidates = [centerId];
+      candidates = [pinnedCenter];
     } else {
       if (!origin) throw new HttpError(400, 'Location needed: send latitude and longitude, or a village, or choose a center.');
       candidates = ranked.filter((r) => r.inventory.status === 'all').map((r) => r.center.centerId);
@@ -57,7 +83,7 @@ const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin,
 
     let chosen = null;
     for (const id of candidates) {
-      if (await tryReserve(c, id, items)) {
+      if (!shelfItems.length || await tryReserve(c, id, shelfItems)) {
         chosen = id;
         break;
       }
@@ -70,7 +96,9 @@ const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin,
       throw new HttpError(409, message, { code: 'out_of_stock', alternatives: shortAlternatives(ranked.filter((r) => r.center.centerId !== centerId)) });
     }
 
-    await checkLowStock(c, chosen, items.map((i) => i.productId));
+    // If a lot just sold out this throws, and the shelf hold above rolls back with it.
+    if (lotItems.length) await reserveLots(c, chosen, lotItems);
+    await checkLowStock(c, chosen, shelfItems.map((i) => i.productId));
 
     const { rows: [center] } = await c.query(
       `SELECT center_id AS "centerId", name, village, phone, operator_id AS "operatorId" FROM village_center WHERE center_id = $1`, [chosen]);
@@ -102,7 +130,7 @@ const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin,
     await notify(c, center.operatorId, {
       type: 'order',
       title: 'New app order',
-      body: `${order.customerName}: ${items.map((i) => `${i.quantity} x ${i.productName}`).join(', ')}. Set it aside for pickup.`,
+      body: `${order.customerName}: ${items.map((i) => `${i.quantity} x ${i.productName}${i.surplusLotId ? ' (surplus)' : ''}`).join(', ')}. Set it aside for pickup.`,
       refId: order.id,
     });
 

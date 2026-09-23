@@ -1,4 +1,5 @@
 const { HttpError } = require('../utils/http');
+const { LOT_LIVE } = require('./surplus');
 
 // ---- People, categorised ------------------------------------------------
 //
@@ -47,7 +48,7 @@ const userSummary = async (db, adminEmails) => {
 
 const overview = async (db, adminEmails, now = new Date()) => {
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const [people, centers, orders, restock, lowStock, unattended, discrepancies] = await Promise.all([
+  const [people, centers, orders, restock, lowStock, unattended, discrepancies, surplusStats] = await Promise.all([
     userSummary(db, adminEmails),
     db.one(
       `SELECT count(*) FILTER (WHERE status = 'active')::int AS active,
@@ -66,10 +67,14 @@ const overview = async (db, adminEmails, now = new Date()) => {
     db.one(`SELECT count(*)::int AS n FROM center_inventory
              WHERE on_hand - reserved <= reorder_level AND low_stock_alerted_at <= $1`, [new Date(now.getTime() - 24 * 60 * 60 * 1000)]),
     db.one("SELECT count(*)::int AS n FROM stock_discrepancy WHERE status = 'open'"),
+    // Lots on sale right now, and the units left in them.
+    db.one(`SELECT count(*)::int AS "activeLots", COALESCE(sum(l.quantity - l.reserved), 0)::int AS units
+              FROM surplus_lot l WHERE ${LOT_LIVE}`),
   ]);
   return {
     people, centers, orders, restockRequests: restock,
     lowStockItems: lowStock.n, lowStockUnattended: unattended.n, discrepanciesOpen: discrepancies.n,
+    surplus: surplusStats,
   };
 };
 

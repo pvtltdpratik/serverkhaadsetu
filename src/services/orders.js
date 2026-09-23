@@ -12,7 +12,7 @@ const newOtp = () => String(crypto.randomInt(0, 10000)).padStart(4, '0');
 const withItems = async (q, orders) => {
   if (!orders.length) return orders;
   const { rows } = await q.query(
-    `SELECT order_id, product_id AS "productId", product_name AS "productName", quantity, unit_price AS "unitPrice"
+    `SELECT order_id, product_id AS "productId", surplus_lot_id AS "surplusLotId", product_name AS "productName", quantity, unit_price AS "unitPrice"
        FROM order_items WHERE order_id = ANY($1) ORDER BY order_id, position`,
     [orders.map((o) => o.id)],
   );
@@ -67,8 +67,8 @@ const insertOrder = async (c, order) => {
   );
   for (const [i, item] of order.items.entries()) {
     await c.query(
-      'INSERT INTO order_items (order_id, position, product_id, product_name, quantity, unit_price) VALUES ($1,$2,$3,$4,$5,$6)',
-      [order.id, i, item.productId || null, item.productName, item.quantity, item.unitPrice],
+      'INSERT INTO order_items (order_id, position, product_id, surplus_lot_id, product_name, quantity, unit_price) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+      [order.id, i, item.productId || null, item.surplusLotId || null, item.productName, item.quantity, item.unitPrice],
     );
   }
 };

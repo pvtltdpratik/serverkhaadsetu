@@ -133,8 +133,11 @@ module.exports = (db) => {
     }
     const lines = input.items.map((raw, i) => {
       if (!raw || typeof raw !== 'object') throw new HttpError(400, `items[${i}] must be an object`);
+      const surplusLotId = str(raw.surplusLotId, `items[${i}].surplusLotId`, { max: 100, optional: true });
       return {
-        productId: str(raw.productId, `items[${i}].productId`, { max: 100 }),
+        // A surplus line names its lot; the product and price come from the lot.
+        productId: surplusLotId ? undefined : str(raw.productId, `items[${i}].productId`, { max: 100 }),
+        surplusLotId,
         quantity: num(raw.quantity, `items[${i}].quantity`, { min: 1, max: 100, integer: true }),
       };
     });
