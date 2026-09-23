@@ -385,6 +385,8 @@ Everything here needs an administrator (`403` otherwise), and every change is wr
 
 **Orders** - `GET /orders` across every center: filters `status`, `type`, `centerId`, `q` (customer name); each has `centerName`; pickup codes are never included.
 
+**Surplus** - `GET /surplus` (filters `status=active|withdrawn`, `centerId`) lists every center's lots, newest first, each with the operator-lot fields plus `centerName` and `village`. `POST /surplus/:id/withdraw` `{reason?}` takes a lot off sale (unsold units go back to the shelf if it was marked down from it); the operator is notified with the reason and the action is audited as `surplus.withdraw`. `404` unknown lot, `409` already withdrawn.
+
 **Restock requests (supply chain)** - `GET /restock-requests` (filters `status`, `centerId`), `PATCH /restock-requests/:id` `{status:"approved"|"fulfilled"}`. Flow is `pending -> approved -> fulfilled`; anything else is `409`. **Approving adds the quantity to the center's `incoming`**; the operator is notified; the stock itself is added when the operator confirms receipt (`POST /operator/inventory/receive`), which clears `incoming`.
 
 **Delivery discrepancies** - `GET /discrepancies` (filter `status=open|resolved`; each has `centerName, productName, expectedQuantity, receivedQuantity, note, status, resolutionNote`), `PATCH /discrepancies/:id` `{note?}` marks it resolved (`409` if already, `404` unknown) and tells the operator. Audit action `discrepancy.resolve`.

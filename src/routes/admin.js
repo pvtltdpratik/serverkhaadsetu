@@ -5,6 +5,7 @@ const admin = require('../services/adminService');
 const { recordAudit } = require('../services/audit');
 const { withItems, serializeOrder } = require('../services/orders');
 const { notify } = require('../services/notifications');
+const surplus = require('../services/surplus');
 
 const CENTER_STATUSES = ['active', 'suspended'];
 const ACCOUNT_STATUSES = ['active', 'suspended'];
@@ -293,6 +294,53 @@ module.exports = (db, roles) => {
       await recordAudit(c, req, { action: 'discrepancy.resolve', targetType: 'discrepancy', targetId: req.params.id, details: { centerId: rows[0].center_id, productId: rows[0].product_id, note } });
     });
     res.json({ id: req.params.id, status: 'resolved' });
+  }));
+
+  // ---- Surplus / second-hand stock ----
+  // Every center's lots, so the platform can see what is being sold cheaply and
+  // step in (for example a lot that is past its date or wrongly described).
+  router.get('/surplus', ah(async (req, res) => {
+    const where = [];
+    const params = [];
+    if (req.query.status) {
+      params.push(oneOf(req.query.status, 'status', ['active', 'withdrawn']));
+      where.push(`l.status = $${params.length}`);
+    }
+    if (req.query.centerId) {
+      params.push(String(req.query.centerId));
+      where.push(`l.center_id = $${params.length}`);
+    }
+    await sendPaged(req, res, db, {
+      select: `${surplus.LOT_COLUMNS}, c.name AS "centerName", c.village`,
+      from: `${surplus.LOT_FROM} JOIN village_center c ON c.center_id = l.center_id${where.length ? ` WHERE ${where.join(' AND ')}` : ''}`,
+      params,
+      order: 'l.created_at DESC, l.id',
+      finish: async (rows) => rows.map(surplus.toMoney),
+    });
+  }));
+
+  // Takes a lot off sale, with an optional reason the operator is told.
+  router.post('/surplus/:id/withdraw', ah(async (req, res) => {
+    const reason = str(body(req).reason, 'reason', { max: 300, optional: true }) || '';
+    const lot = (await db.query('SELECT center_id FROM surplus_lot WHERE id = $1', [req.params.id])).rows[0];
+    if (!lot) throw new HttpError(404, 'Surplus lot not found');
+    const result = await surplus.withdrawLot(db, {
+      centerId: lot.center_id,
+      id: req.params.id,
+      after: async (tx, l) => {
+        const operator = (await tx.query('SELECT operator_id FROM village_center WHERE center_id = $1', [l.centerId])).rows[0];
+        if (operator) {
+          await notify(tx, operator.operator_id, {
+            type: 'stock',
+            title: 'A surplus offer was withdrawn',
+            body: reason ? `The platform took one of your surplus offers off sale: ${reason}` : 'The platform took one of your surplus offers off sale.',
+            refId: l.id,
+          });
+        }
+        await recordAudit(tx, req, { action: 'surplus.withdraw', targetType: 'surplus', targetId: l.id, details: { centerId: l.centerId, productId: l.productId, reason } });
+      },
+    });
+    res.json(result);
   }));
 
   // ---- Audit log ----

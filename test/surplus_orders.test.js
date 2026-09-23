@@ -27,6 +27,17 @@ const call = async (method, path, { body, device = 'farmer-1' } = {}) => {
   const text = await res.text();
   return { status: res.status, json: text ? JSON.parse(text) : null };
 };
+// The maintenance job holds a database-wide advisory lock, and test files run in
+// parallel against one database, so another file's run can make ours skip.
+// Retry until it really ran.
+const runJob = async (job, now) => {
+  for (let i = 0; i < 50; i += 1) {
+    const result = await job(db, now);
+    if (!result.skipped) return result;
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  throw new Error('the job never got the lock');
+};
 const errorText = (res) => res.json?.error?.message ?? res.json?.error ?? '';
 
 // A center `dLat` degrees north of the farmer's spot (0.01 deg is about 1.1 km).
@@ -251,7 +262,7 @@ test('an expired reservation releases its surplus units', async () => {
   const lot = await makeLot(c, { quantity: 4 });
   const placed = (await buy(lot.id, 4, { device: 'no-show' })).json;
   assert.equal((await lotOf(c, lot.id)).available, 0);
-  await runMaintenance(db, new Date(Date.now() + 5 * DAY + 60 * 1000));
+  await runJob(runMaintenance, new Date(Date.now() + 5 * DAY + 60 * 1000));
   assert.equal((await call('GET', `/v1/orders/${placed.id}`, { device: 'no-show' })).json.status, 'cancelled');
   assert.equal((await lotOf(c, lot.id)).available, 4);
 });
@@ -294,7 +305,7 @@ test('an order holding surplus is not moved to another center when its center go
   const regularOrder = (await call('POST', '/v1/orders', { device: 'mover', body: { centerId: a.centerId, latitude: 18.5, longitude: 74.0, items: [{ productId: NEEM, quantity: 1 }] } })).json;
 
   await call('PATCH', '/v1/operator/center', { device: a.device, body: { isOpen: false } });
-  const run = await runReassignment(db, { now: new Date(Date.now() + 40 * 60000) });
+  const run = await runJob((d, now) => runReassignment(d, { now }), new Date(Date.now() + 40 * 60000));
   assert.ok(run.moved >= 1);
   const centerOf = async (id) => (await db.query('SELECT center_id FROM orders WHERE id = $1', [id])).rows[0].center_id;
   assert.notEqual(await centerOf(regularOrder.id), a.centerId, 'a regular order moves to whichever center ranks best');
@@ -311,4 +322,48 @@ test('the admin overview counts what surplus is on sale', async () => {
   const after = (await call('GET', '/v1/admin/overview', { device: 'admin' })).json.surplus;
   assert.equal(after.activeLots, before.activeLots + 1);
   assert.equal(after.units, before.units + 7);
+});
+
+test('admin: sees every center\'s lots and can filter them', async () => {
+  const a = await makeCenter('adm-a');
+  const b = await makeCenter('adm-b');
+  const lotA = await makeLot(a, { note: 'from a' });
+  const lotB = await makeLot(b, { note: 'from b' });
+  await call('POST', `/v1/operator/surplus/${lotB.id}/withdraw`, { device: b.device });
+
+  const all = await call('GET', '/v1/admin/surplus?limit=200', { device: 'admin' });
+  assert.equal(all.status, 200);
+  const mine = all.json.filter((l) => [lotA.id, lotB.id].includes(l.id));
+  assert.equal(mine.length, 2);
+  assert.equal(mine.find((l) => l.id === lotA.id).centerName, 'Center adm-a');
+  assert.equal(mine.find((l) => l.id === lotA.id).discountPercent, 33);
+
+  const byCenter = (await call('GET', `/v1/admin/surplus?centerId=${b.centerId}`, { device: 'admin' })).json;
+  assert.deepEqual(byCenter.map((l) => l.id), [lotB.id]);
+  const active = (await call('GET', `/v1/admin/surplus?status=active&centerId=${b.centerId}`, { device: 'admin' })).json;
+  assert.equal(active.length, 0);
+  assert.equal((await call('GET', '/v1/admin/surplus?status=bogus', { device: 'admin' })).status, 400);
+});
+
+test('admin: withdrawing a lot tells the operator why, is audited, and is refused twice', async () => {
+  const c = await makeCenter('adm-wd');
+  await receive(c, 10);
+  const lot = await makeLot(c, { quantity: 6, fromShelf: true });
+  const res = await call('POST', `/v1/admin/surplus/${lot.id}/withdraw`, { device: 'admin', body: { reason: 'Past its date' } });
+  assert.equal(res.status, 200, JSON.stringify(res.json));
+  assert.equal(res.json.status, 'withdrawn');
+  assert.equal((await shelf(c)).currentStock, 10, 'shelf units go back, as with an operator withdrawal');
+
+  const alerts = (await call('GET', '/v1/farmer/notifications', { device: c.device })).json.filter((n) => n.title === 'A surplus offer was withdrawn');
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].body, /Past its date/);
+  assert.equal(alerts[0].refId, lot.id);
+
+  const audit = (await call('GET', `/v1/admin/audit?targetType=surplus&targetId=${lot.id}`, { device: 'admin' })).json;
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0].action, 'surplus.withdraw');
+  assert.equal(audit[0].details.reason, 'Past its date');
+
+  assert.equal((await call('POST', `/v1/admin/surplus/${lot.id}/withdraw`, { device: 'admin' })).status, 409);
+  assert.equal((await call('POST', '/v1/admin/surplus/lot-nope/withdraw', { device: 'admin' })).status, 404);
 });

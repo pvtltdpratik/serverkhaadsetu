@@ -92,7 +92,9 @@ const updateLot = async (db, { centerId, id, unitPrice, note }) => {
 
 // Takes the lot off sale. Units already held by an app order stay in the lot
 // until that order ends; the rest go back to the shelf if they came from it.
-const withdrawLot = async (db, { centerId, id }) => {
+// `after(client, lot)` runs in the same transaction, so an audit entry or a
+// notification commits or rolls back with the withdrawal.
+const withdrawLot = async (db, { centerId, id, after }) => {
   try {
     await db.tx(async (c) => {
       const { rows } = await c.query(
@@ -108,6 +110,7 @@ const withdrawLot = async (db, { centerId, id }) => {
         await c.query('UPDATE center_inventory SET on_hand = on_hand + $3 WHERE center_id = $1 AND product_id = $2', [centerId, lot.product_id, free]);
         await rearmLowStock(c, centerId, [lot.product_id]);
       }
+      if (after) await after(c, { id, centerId, productId: lot.product_id, quantity: lot.quantity, reserved: lot.reserved });
     });
   } catch (err) {
     if (err.code === '23514') throw new HttpError(409, "Returning these units would exceed this center's storage capacity for the product");
