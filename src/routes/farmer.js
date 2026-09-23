@@ -1,5 +1,5 @@
 const express = require('express');
-const { HttpError, asyncHandler, str, num, body, deviceId, sendPaged } = require('../utils/http');
+const { HttpError, asyncHandler, str, num, oneOf, body, deviceId, sendPaged } = require('../utils/http');
 const { unreadCount, NOTIFICATION_COLUMNS } = require('../services/notifications');
 
 const RETENTION_DAYS = 15;
@@ -9,14 +9,19 @@ const NUTRIENTS = [
   ['nutrient_k', 'Potassium', 'wood ash or well-rotted compost'],
 ];
 
-const defaultProfile = () => ({ name: 'Farmer', village: '', landHoldingHectares: 0 });
+const defaultProfile = () => ({
+  name: 'Farmer', village: '', landHoldingHectares: 0, latitude: null, longitude: null, locationSource: null, homeCenterId: null,
+});
 
 module.exports = (db) => {
   const router = express.Router();
   const ah = asyncHandler;
 
   const profileFor = async (q, owner) =>
-    (await q.query('SELECT name, village, land_holding_hectares AS "landHoldingHectares" FROM profiles WHERE owner_id = $1', [owner])).rows[0];
+    (await q.query(
+      `SELECT name, village, land_holding_hectares AS "landHoldingHectares", latitude, longitude,
+              location_source AS "locationSource", home_center_id AS "homeCenterId"
+         FROM profiles WHERE owner_id = $1`, [owner])).rows[0];
 
   // The unread badge count is always derived from real notifications.
   const publicProfile = async (q, p, owner) => ({
@@ -24,6 +29,10 @@ module.exports = (db) => {
     village: p.village,
     unreadNotificationCount: await unreadCount(q, owner),
     landHoldingHectares: p.landHoldingHectares,
+    latitude: p.latitude,
+    longitude: p.longitude,
+    locationSource: p.locationSource,
+    homeCenterId: p.homeCenterId,
   });
 
   router.get('/profile', ah(async (req, res) => {
@@ -43,10 +52,34 @@ module.exports = (db) => {
       if (input.landHoldingHectares !== undefined) {
         merged.landHoldingHectares = num(input.landHoldingHectares, 'landHoldingHectares', { min: 0, max: 10000 });
       }
+      // Location is saved as a pair: a lone latitude is meaningless.
+      if (input.latitude !== undefined || input.longitude !== undefined) {
+        if (input.latitude === null && input.longitude === null) {
+          merged.latitude = null;
+          merged.longitude = null;
+          merged.locationSource = null;
+        } else {
+          merged.latitude = num(input.latitude, 'latitude', { min: -90, max: 90 });
+          merged.longitude = num(input.longitude, 'longitude', { min: -180, max: 180 });
+          merged.locationSource = oneOf(input.locationSource === undefined ? 'gps' : input.locationSource, 'locationSource', ['gps', 'pin', 'village']);
+        }
+      }
+      if (input.homeCenterId !== undefined) {
+        if (input.homeCenterId === null) merged.homeCenterId = null;
+        else {
+          const id = str(input.homeCenterId, 'homeCenterId', { max: 100 });
+          const found = await c.query("SELECT 1 FROM village_center WHERE center_id = $1 AND status = 'active'", [id]);
+          if (!found.rows.length) throw new HttpError(404, 'Village center not found');
+          merged.homeCenterId = id;
+        }
+      }
       await c.query(
-        `INSERT INTO profiles (owner_id, name, village, land_holding_hectares) VALUES ($1,$2,$3,$4)
-         ON CONFLICT (owner_id) DO UPDATE SET name = EXCLUDED.name, village = EXCLUDED.village, land_holding_hectares = EXCLUDED.land_holding_hectares`,
-        [owner, merged.name, merged.village, merged.landHoldingHectares],
+        `INSERT INTO profiles (owner_id, name, village, land_holding_hectares, latitude, longitude, location_source, home_center_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (owner_id) DO UPDATE SET name = EXCLUDED.name, village = EXCLUDED.village,
+           land_holding_hectares = EXCLUDED.land_holding_hectares, latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude,
+           location_source = EXCLUDED.location_source, home_center_id = EXCLUDED.home_center_id`,
+        [owner, merged.name, merged.village, merged.landHoldingHectares, merged.latitude, merged.longitude, merged.locationSource, merged.homeCenterId],
       );
       return merged;
     });

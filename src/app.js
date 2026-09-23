@@ -18,6 +18,7 @@ const schemesRouter = require('./routes/schemes');
 const operatorRouter = require('./routes/operator');
 const adminRouter = require('./routes/admin');
 const meRouter = require('./routes/me');
+const centersRouter = require('./routes/centers');
 const { createRoles } = require('./middleware/roles');
 
 // `options.auth` lets tests inject their own key set; production reads
@@ -50,6 +51,7 @@ const createApp = (db, options = {}) => {
   v1.use('/community', communityRouter(db));
   v1.use('/schemes', schemesRouter(db));
   v1.use('/me', meRouter(db, roles));
+  v1.use('/centers', centersRouter(db));
   v1.use('/operator', operatorRouter(db, roles));
   v1.use('/admin', adminRouter(db, roles));
   app.use('/v1', v1);

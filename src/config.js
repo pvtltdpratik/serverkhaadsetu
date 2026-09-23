@@ -18,6 +18,8 @@ module.exports = {
   // Comma-separated emails of platform administrators (matched against the
   // verified Supabase token's email). Nobody is an admin unless listed here.
   superAdminEmails: (process.env.SUPER_ADMIN_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean),
+  // Centers' opening hours are judged on this clock, not the server's.
+  centerTimezone: process.env.CENTER_TIMEZONE || 'Asia/Kolkata',
   commissionRatePercent: Number(process.env.COMMISSION_RATE_PERCENT) || 5,
   corsOrigin: process.env.CORS_ORIGIN || '*',
 };

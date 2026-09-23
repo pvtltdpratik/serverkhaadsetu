@@ -365,6 +365,32 @@ Call after sign-in. Records the account and returns `{userId, email, name, reque
 - `GET /v1/admin/users` - everyone who has signed in. Filters `requestedRole`, `q`, `unassigned=true` (not running a center). Each row has `centerId`/`centerName` when they operate one.
 All admin routes: `403` for non-admins.
 
+### Finding a center (farmer) - `/v1/centers`
+`POST /v1/centers/nearby` returns the best centers for a farmer, ranked by distance **and** stock, not just proximity.
+
+Body (all optional except a way to locate the farmer):
+```json
+{ "latitude": 18.83, "longitude": 74.37, "locationSource": "gps",
+  "village": "Shirur, Pune",
+  "items": [{"productId": "p-neemcake", "quantity": 2}],
+  "limit": 5, "saveToProfile": false }
+```
+Location is taken from the first that applies: (1) `latitude`+`longitude` (`locationSource` `gps` (default) or `pin`), (2) `village`, (3) coordinates saved on the profile, (4) the profile's registered village. None -> `400`; unknown village -> `404`. `saveToProfile:true` stores a GPS/pin fix on the profile (never a village lookup). `items` is the cart or recommendation list; same product twice is summed; unknown product -> `404`.
+
+Response: `{location:{latitude,longitude,source}, radiusKm, centers:[...]}`. The radius is adaptive: 10 km, widened to 20 then 35 only until at least 2 centers are found. Only active centers with an operator are considered. Each entry:
+- `center`: `centerId, name, village, district, latitude, longitude, operatorName, phone, rating` (`rating` is `null` until ratings exist).
+- `distanceKm` (Haversine, 1 decimal), `estimatedTravelMinutes` with `travelTimeIsEstimate:true` (from distance: roads x1.3 at 30 km/h; no road data yet - show it as "~").
+- `inventory`: `status` `all|partial|none` (`null` with no cart), `label` ("All items available" / "2 of 4 items available" / "Out of stock for your order"), `availableItems`, `totalItems`, and per-item `{productId, requested, available, isFullyAvailable}`. `available` = on hand minus reserved.
+- `hours`: `{isOpenNow, isSwitchedOn, opensAt, closesAt, minutesUntilOpen, label}` - e.g. "Open until 18:00", "Opens tomorrow at 09:00", "Closed by operator". Judged in `CENTER_TIMEZONE` (default Asia/Kolkata).
+- `pendingPickups`, `isHomeCenter`, `isRecommended` (only the first), and `recommendationReason` on the recommended one ("Closest center with all your items in stock", "2.3 km away, 3 of 4 items available", "Your home center: ...").
+- `scores`: `distance, inventory, operational, historical, total` (0-100).
+
+**Ranking.** `total = 0.40*distance + 0.35*inventory + 0.15*operational + 0.10*historical`, times 1.2 (capped at 100) for the farmer's home center. Distance: 100 within 2 km, straight down to 0 at 35 km. Inventory: average of `min(available/requested, 1)` over the cart (neutral 50 with no cart). Operational: 60 if open now (30 if switched on and opening within 12 h) plus up to 40 for a short queue (pending + ready orders, capped at 50). Historical: 50 for everyone until ratings, pickup waits and stockouts are recorded. A center with **none** of the cart is always listed after every center that has something.
+
+`GET /v1/centers/villages?q=` searches the built-in village list used for the village fallback (approximate town centres; no geocoder).
+
+Profile (`/v1/farmer/profile`) now also carries `latitude`, `longitude`, `locationSource` (`gps|pin|village`) and `homeCenterId`. `PUT` takes latitude+longitude together (both `null` clears them) and `homeCenterId` (an active center, or `null`).
+
 ## 10. Operator (village center) - `/v1/operator/...`
 All routes need the caller to own an **active** center (`403` otherwise) and only ever touch that center's data.
 
