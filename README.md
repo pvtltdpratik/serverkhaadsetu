@@ -104,6 +104,18 @@ See `API.md` for the full request/response shapes.
 
 Farmers find lots with `POST /v1/centers/surplus` and reserve them by putting `{surplusLotId, quantity}` in an order line; a walk-in line can name a `surplusLotId` too. Admins see and withdraw lots under `/v1/admin/surplus`. See `API.md` for the details.
 
+### Home delivery — farmers who deliver for other farmers
+
+A farmer with a bike, pickup or tractor applies to deliver (`/v1/delivery/partner`, papers uploaded as photos), the village center that checks them approves, and from then on they can take jobs. There is no separate login: it is the same account with one more switch.
+
+- **Ordering with delivery**: `POST /v1/orders` with `fulfilment: "delivery"` and a `deliveryAddress`. The fee is computed on the server (base + per km by road + per 10 kg), shown beforehand by `POST /v1/delivery/quote`, and never taken from the client. Collect-it-yourself stays the default and is always free.
+- **Finding a partner**: the nearest free approved partners who can carry the load are asked, three at a time; the first to accept gets it. Nobody free: the operator is asked to pick someone; after 45 minutes the order simply falls back to pickup.
+- **Two codes**: the partner shows a handover code that the operator (or, for a farmer-to-farmer load, the sender) types to give him the goods; the buyer (or receiver) reads a drop code to the partner on arrival. Five wrong tries lock a step for 15 minutes.
+- **Money**: there is no payment system. The buyer pays goods + fee in cash to the partner, who keeps the fee and owes the goods amount to the center; the operator records it as handed over (`/v1/operator/delivery-cash`).
+- **More than one order per trip** (batching, `DELIVERY_MAX_ACTIVE_JOBS`), **trips** ("I am going there tomorrow with room to spare") and **farmer-to-farmer loads** (`/v1/delivery/p2p`) are in `API.md` section 12.
+
+Settings (all optional, with sensible defaults): `DELIVERY_BASE_FEE`, `DELIVERY_PER_KM`, `DELIVERY_PER_10KG`, `DELIVERY_MIN_FEE`, `DELIVERY_MAX_KM`, `DELIVERY_OFFERS_PER_ROUND`, `DELIVERY_OFFER_MINUTES`, `DELIVERY_SEARCH_MINUTES`, `DELIVERY_MAX_ACTIVE_JOBS`, `DELIVERY_BATCH_KM`, `DELIVERY_TRIP_MATCH_KM`, `DELIVERY_MAX_OPEN_P2P`, `RATE_LIMIT_OTP`.
+
 ## Deploying on EC2
 
 - Install Node 20+: `sudo dnf install -y nodejs20`.
@@ -115,7 +127,9 @@ Farmers find lots with `POST /v1/centers/surplus` and reserve them by putting `{
 
 - Set `SUPER_ADMIN_EMAILS` (comma-separated) or nobody can use `/v1/admin`. Roles are decided by the server: an operator is whoever owns a village center, an admin is whoever is on that list.
 - Migrations `003` (multi-center inventory) and `007` (drops the old `farmers` table) are **destructive**: they remove the old single-shop inventory and demo orders. Back up first if you have data you care about.
-- Migrations run automatically when the server starts.
+- Migrations run automatically when the server starts. `010` to `012` (home delivery, jobs, trips) only **add** tables and columns, so they are safe on a database with data.
+- Photos of licences and RCs are kept in Postgres (private, never served publicly), so the database backup covers them.
+- The server runs a small dispatch loop every 30 seconds (offers to the next partners, giving up on jobs nobody took). It takes an advisory lock, so running several instances is fine.
 
 ## Not built yet
 
