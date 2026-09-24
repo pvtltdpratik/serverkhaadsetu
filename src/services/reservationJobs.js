@@ -31,6 +31,7 @@ const runReservationMaintenance = async (db, now = new Date()) => {
     for (const { id } of due) {
       const order = await findOrder(c, id, { lock: true });
       if (!order.stockReserved || (order.status !== 'pending' && order.status !== 'readyForPickup')) continue;
+      await require('./deliveryJobs').cancelJobForOrder(c, id, 'The order expired');
       await releaseOrderStock(c, order);
       await c.query("UPDATE orders SET status = 'cancelled', pickup_otp = NULL WHERE id = $1", [id]);
       await notify(c, order.ownerId, {

@@ -344,6 +344,18 @@ const setOnline = async (db, userId, online) => {
   return getMine(db, userId);
 };
 
+// Where he is right now: what the nearest-first matching and the buyer's live
+// tracking use. Only an approved partner has a reason to share it. If he is on a
+// job, the job's copy (what the buyer watches) moves too.
+const setLocation = async (db, userId, { latitude, longitude }) => {
+  const { rowCount } = await db.query(
+    `UPDATE delivery_partner SET latitude = $2, longitude = $3, located_at = now() WHERE user_id = $1 AND status = 'approved'`, [userId, latitude, longitude]);
+  if (!rowCount) throw new HttpError(403, 'Only an approved delivery partner can share a location');
+  await db.query(
+    `UPDATE delivery_job SET partner_latitude = $2, partner_longitude = $3, partner_located_at = now()
+      WHERE partner_id = $1 AND status IN ('assigned','in_transit')`, [userId, latitude, longitude]);
+};
+
 // Stops delivering for good and removes the papers.
 const withdraw = async (db, userId) => {
   const { rowCount } = await db.query('DELETE FROM delivery_partner WHERE user_id = $1', [userId]);
@@ -403,5 +415,5 @@ const detailFor = async (q, userId, { centerId = null } = {}) => {
 module.exports = {
   VEHICLES, STATUSES, DOC_KINDS, PARTNER_COLUMNS, PARTNER_FROM,
   daysFromMask, maskFromDays, normalizeVehicleNumber, normalizePhone, checkCapacity, availabilityAt, missingFor,
-  toView, getMine, saveDetails, saveDocument, readDocument, submit, setOnline, withdraw, review, detailFor, findRow,
+  toView, setLocation, getMine, saveDetails, saveDocument, readDocument, submit, setOnline, withdraw, review, detailFor, findRow,
 };

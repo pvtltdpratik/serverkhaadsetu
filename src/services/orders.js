@@ -3,7 +3,8 @@ const { HttpError } = require('../utils/http');
 const { releaseOrderStock } = require('./reservations');
 
 const ORDER_COLUMNS = `id, customer_name AS "customerName", type, status, created_at AS "createdAt", pickup_otp AS "pickupOtp",
-  owner_id AS "ownerId", center_id AS "centerId", stock_reserved AS "stockReserved", reserved_until AS "reservedUntil"`;
+  owner_id AS "ownerId", center_id AS "centerId", stock_reserved AS "stockReserved", reserved_until AS "reservedUntil",
+  fulfilment, delivery_fee AS "deliveryFee"`;
 
 const newOrderId = () => `order-${crypto.randomUUID()}`;
 const newOtp = () => String(crypto.randomInt(0, 10000)).padStart(4, '0');
@@ -31,7 +32,11 @@ const serializeOrder = (order, { includeOtp }) => {
   return {
     ...rest,
     pickupOtp: includeOtp ? order.pickupOtp : null,
+    fulfilment: order.fulfilment || 'pickup',
+    deliveryFee: Number(order.deliveryFee || 0),
     totalAmount: totalOf(order),
+    // Goods plus the delivery fee: what the buyer pays in cash when it arrives.
+    payableAmount: totalOf(order) + Number(order.deliveryFee || 0),
     itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0),
   };
 };
@@ -51,6 +56,8 @@ const cancelOrder = async (db, id, onCancelled) =>
     if (order.status !== 'pending' && order.status !== 'readyForPickup') {
       throw new HttpError(409, `A ${order.status} order cannot be cancelled`);
     }
+    // A delivery on the way cannot be called back; anything earlier is ended with the order.
+    await require('./deliveryJobs').cancelJobForOrder(c, id, 'The order was cancelled');
     await c.query("UPDATE orders SET status = 'cancelled', pickup_otp = NULL WHERE id = $1", [id]);
     await releaseOrderStock(c, order); // the held stock goes back on the shelf
     if (onCancelled) await onCancelled(c, order);

@@ -21,5 +21,22 @@ module.exports = {
   // Centers' opening hours are judged on this clock, not the server's.
   centerTimezone: process.env.CENTER_TIMEZONE || 'Asia/Kolkata',
   commissionRatePercent: Number(process.env.COMMISSION_RATE_PERCENT) || 5,
+  // Home delivery by farmers with vehicles. The fee is base + per km (by road) +
+  // per 10 kg above the first 10, rounded up to the next Rs 5, never below minFee.
+  delivery: {
+    baseFee: Number(process.env.DELIVERY_BASE_FEE) || 25,
+    perKm: Number(process.env.DELIVERY_PER_KM) || 4,
+    per10Kg: Number(process.env.DELIVERY_PER_10KG) || 2,
+    minFee: Number(process.env.DELIVERY_MIN_FEE) || 30,
+    // Farthest a delivery goes, by road, from the center to the farm.
+    maxRoadKm: Number(process.env.DELIVERY_MAX_KM) || 20,
+    // Offers go to this many nearby partners at a time, each open for this long.
+    offersPerRound: Number(process.env.DELIVERY_OFFERS_PER_ROUND) || 3,
+    offerMinutes: Number(process.env.DELIVERY_OFFER_MINUTES) || 4,
+    // After this long with nobody, the order goes back to plain pickup.
+    searchMinutes: Number(process.env.DELIVERY_SEARCH_MINUTES) || 45,
+    // How many jobs one partner may carry at once.
+    maxActiveJobs: Number(process.env.DELIVERY_MAX_ACTIVE_JOBS) || 1,
+  },
   corsOrigin: process.env.CORS_ORIGIN || '*',
 };

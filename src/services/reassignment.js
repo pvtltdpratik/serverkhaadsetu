@@ -45,6 +45,8 @@ const runReassignment = async (db, { now = new Date(), timeZone = 'Asia/Kolkata'
               EXISTS (SELECT 1 FROM app_user u WHERE u.user_id = ce.operator_id AND u.status = 'suspended') AS "operatorSuspended"
          FROM orders o JOIN village_center ce ON ce.center_id = o.center_id
         WHERE o.type = 'appOrder' AND o.status = 'pending' AND o.stock_reserved
+          -- A delivery is planned from one center (route, fee, partner): it does not move.
+          AND o.fulfilment = 'pickup'
           AND o.reassign_count < $1 AND o.created_at <= $2
           -- Surplus units exist only at the center that listed them, so such an order cannot move.
           AND NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id = o.id AND oi.surplus_lot_id IS NOT NULL)

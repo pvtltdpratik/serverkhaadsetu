@@ -206,6 +206,7 @@ module.exports = (db, roles) => {
     const otp = str(body(req).otp, 'otp', { min: 4, max: 4 });
     const order = await db.tx(async (c) => {
       const current = ownCenterOrder(req, await findOrder(c, req.params.id, { lock: true }));
+      if (current.fulfilment === 'delivery') throw new HttpError(409, 'This order is a home delivery. Enter the delivery partner\'s handover code under Deliveries instead.');
       if (current.status !== 'readyForPickup') throw new HttpError(409, 'This order is not ready for pickup yet');
 
       const expected = Buffer.from(current.pickupOtp || '');

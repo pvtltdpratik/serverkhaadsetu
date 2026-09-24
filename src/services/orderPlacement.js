@@ -6,6 +6,10 @@ const { findNearby } = require('./nearbyCenters');
 const { notify } = require('./notifications');
 const { checkLowStock } = require('./stockAlerts');
 const { SERVICEABLE } = require('./centerService');
+const { createForOrder } = require('./deliveryJobs');
+const { roadKm } = require('./deliveryFee');
+const { haversineKm } = require('./geo');
+const config = require('../config');
 
 const RESERVATION_DAYS = 5;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -29,7 +33,9 @@ const shortAlternatives = (ranked) =>
 //           that listed it, so an order with one goes to that center (and any
 //           regular lines in the same cart must be available there too).
 //   origin  {latitude, longitude} of the farmer, or null
-const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin, homeCenterId, timeZone, now = new Date() }) => {
+//   delivery  null for collection at the center, or {latitude, longitude, phone, label?, village?, note?}
+//           to have a delivery partner bring it. The fee is worked out here, never taken from the client.
+const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin, homeCenterId, timeZone, now = new Date(), delivery = null }) => {
   return db.tx(async (c) => {
     // Prices always come from the catalog (or the surplus lot); never trust a
     // client-supplied price.
@@ -81,6 +87,16 @@ const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin,
       candidates = ranked.filter((r) => r.inventory.status === 'all').map((r) => r.center.centerId);
     }
 
+    // A delivery can only start from a center within reach of the farm.
+    if (delivery) {
+      const { rows: spots } = await c.query('SELECT center_id AS "centerId", latitude, longitude FROM village_center WHERE center_id = ANY($1)', [candidates]);
+      const near = new Set(spots.filter((s) => roadKm(haversineKm(s, delivery)) <= config.delivery.maxRoadKm).map((s) => s.centerId));
+      candidates = candidates.filter((id) => near.has(id));
+      if (!candidates.length) {
+        throw new HttpError(400, `Home delivery is only available within ${config.delivery.maxRoadKm} km of a village center. You can collect it yourself instead.`, { code: 'delivery_too_far', maxRoadKm: config.delivery.maxRoadKm });
+      }
+    }
+
     let chosen = null;
     for (const id of candidates) {
       if (!shelfItems.length || await tryReserve(c, id, shelfItems)) {
@@ -101,7 +117,7 @@ const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin,
     await checkLowStock(c, chosen, shelfItems.map((i) => i.productId));
 
     const { rows: [center] } = await c.query(
-      `SELECT center_id AS "centerId", name, village, phone, operator_id AS "operatorId" FROM village_center WHERE center_id = $1`, [chosen]);
+      `SELECT center_id AS "centerId", name, village, phone, latitude, longitude, operator_id AS "operatorId" FROM village_center WHERE center_id = $1`, [chosen]);
     const profile = (await c.query('SELECT name FROM profiles WHERE owner_id = $1', [owner])).rows[0];
     const order = {
       id: newOrderId(),
@@ -120,17 +136,28 @@ const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin,
     };
     await insertOrder(c, order);
 
+    let job = null;
+    if (delivery) {
+      const goodsAmount = items.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0);
+      job = await createForOrder(c, { order, center, items, delivery, goodsAmount, now, timeZone });
+      order.fulfilment = 'delivery';
+      order.deliveryFee = job.fee;
+      order.pickupOtp = null; // the partner's handover code is used instead of a counter code
+    }
+
     await notify(c, owner, {
       type: 'order',
       title: 'Order placed',
-      body: `Your pickup code is ${order.pickupOtp}. Collect it from ${center.name}, ${center.village} within ${RESERVATION_DAYS} days.`,
+      body: job
+        ? `We are finding a delivery partner. Delivery fee Rs ${job.fee}, paid in cash when it arrives. If nobody is free you can collect it at ${center.name}, ${center.village}.`
+        : `Your pickup code is ${order.pickupOtp}. Collect it from ${center.name}, ${center.village} within ${RESERVATION_DAYS} days.`,
       refId: order.id,
     });
     // The operator learns about it immediately, with what to set aside.
     await notify(c, center.operatorId, {
       type: 'order',
       title: 'New app order',
-      body: `${order.customerName}: ${items.map((i) => `${i.quantity} x ${i.productName}${i.surplusLotId ? ' (surplus)' : ''}`).join(', ')}. Set it aside for pickup.`,
+      body: `${order.customerName}: ${items.map((i) => `${i.quantity} x ${i.productName}${i.surplusLotId ? ' (surplus)' : ''}`).join(', ')}. ${job ? 'A delivery partner will collect it: set it aside.' : 'Set it aside for pickup.'}`,
       refId: order.id,
     });
 

@@ -2,6 +2,12 @@ const express = require('express');
 const multer = require('multer');
 const { asyncHandler, str, num, body, deviceId } = require('../utils/http');
 const partners = require('../services/deliveryPartner');
+const jobs = require('../services/deliveryJobs');
+const { resolveOrigin } = require('../services/location');
+const { HttpError } = require('../utils/http');
+const { haversineKm } = require('../services/geo');
+const { SERVICEABLE } = require('../services/centerService');
+const config = require('../config');
 
 // Same as the soil upload: keep the bytes in memory, and decide what they are
 // from the bytes themselves (the phone's claimed type is not trusted).
@@ -58,6 +64,83 @@ module.exports = (db) => {
   // Stop delivering and remove my papers.
   router.delete('/partner', ah(async (req, res) => {
     await partners.withdraw(db, deviceId(req));
+    res.status(204).end();
+  }));
+
+  // ---- What would a delivery cost? ----
+  // Before ordering: the fee, the load, and whether a partner is free right now.
+  // Without centerId the nearest working center within reach of the farm is used.
+  router.post('/quote', ah(async (req, res) => {
+    const input = body(req);
+    if (!Array.isArray(input.items) || input.items.length < 1 || input.items.length > 50) throw new HttpError(400, '"items" must be an array of 1-50 entries');
+    const items = input.items.map((raw, i) => {
+      if (!raw || typeof raw !== 'object') throw new HttpError(400, `items[${i}] must be an object`);
+      const surplusLotId = str(raw.surplusLotId, `items[${i}].surplusLotId`, { max: 100, optional: true });
+      return {
+        productId: surplusLotId ? undefined : str(raw.productId, `items[${i}].productId`, { max: 100 }),
+        surplusLotId,
+        quantity: num(raw.quantity, `items[${i}].quantity`, { min: 1, max: 100, integer: true }),
+      };
+    });
+    const located = await resolveOrigin(db, deviceId(req), input);
+    if (!located) throw new HttpError(400, 'Where should it be delivered? Send latitude and longitude.');
+    const drop = located.origin;
+    const centerId = str(input.centerId, 'centerId', { max: 100, optional: true });
+
+    let center;
+    if (centerId) {
+      center = (await db.query(`SELECT c.center_id AS "centerId", c.name, c.village, c.latitude, c.longitude FROM village_center c WHERE c.center_id = $1 AND ${SERVICEABLE}`, [centerId])).rows[0];
+      if (!center) throw new HttpError(404, 'Village center not found');
+    } else {
+      const { rows } = await db.query(`SELECT c.center_id AS "centerId", c.name, c.village, c.latitude, c.longitude FROM village_center c WHERE ${SERVICEABLE}`);
+      center = rows.map((r) => ({ ...r, km: haversineKm(r, drop) })).sort((a, b) => a.km - b.km)[0];
+      if (!center) throw new HttpError(404, 'No village center is working near you');
+    }
+    const priced = await jobs.priceDelivery(db, { center, items, drop });
+    let partnersFree = 0;
+    if (!priced.tooFar) {
+      partnersFree = (await jobs.eligiblePartners(db, {
+        job: { weightKg: priced.weightKg, requesterId: deviceId(req), roadKm: priced.roadKm, pickup: center }, now: new Date(), timeZone: config.centerTimezone,
+      })).length;
+    }
+    res.json({
+      centerId: center.centerId, centerName: center.name, centerVillage: center.village,
+      available: !priced.tooFar, fee: priced.fee, weightKg: priced.weightKg, roadKm: priced.roadKm, maxRoadKm: priced.maxRoadKm,
+      suggestedVehicle: priced.suggestedVehicle,
+      // How many partners could take it this minute. Zero is not a refusal: the
+      // request stays open for a while and then falls back to plain pickup.
+      partnersFree,
+      note: priced.tooFar
+        ? `Home delivery is only available within ${priced.maxRoadKm} km of the center. You can collect it yourself instead.`
+        : partnersFree
+          ? 'A delivery partner nearby is free right now.'
+          : 'No delivery partner is free right now. We will keep looking, and if nobody takes it you can collect it at the center for free.',
+      payment: 'You pay the goods and the delivery fee in cash to the delivery partner when it arrives.',
+    });
+  }));
+
+  // ---- Sharing where I am (so the nearest partner gets the offer, and the buyer can follow) ----
+  router.put('/partner/location', ah(async (req, res) => {
+    const input = body(req);
+    await partners.setLocation(db, deviceId(req), {
+      latitude: num(input.latitude, 'latitude', { min: -90, max: 90 }),
+      longitude: num(input.longitude, 'longitude', { min: -180, max: 180 }),
+    });
+    res.status(204).end();
+  }));
+
+  // ---- Jobs ----
+  // What has been offered to me and is still open, and the job I am doing now.
+  router.get('/jobs/offers', ah(async (req, res) => res.json(await jobs.offersFor(db, deviceId(req)))));
+  router.get('/jobs/active', ah(async (req, res) => res.json(await jobs.activeFor(db, deviceId(req)))));
+  router.get('/jobs/:id', ah(async (req, res) => res.json(await jobs.jobForPartner(db, deviceId(req), req.params.id))));
+
+  // Whoever accepts first gets it; everyone else is told it is gone (409).
+  router.post('/jobs/:id/accept', ah(async (req, res) => res.json(await jobs.accept(db, deviceId(req), req.params.id))));
+
+  // Turns an offer down, or hands back a job I accepted but have not collected yet.
+  router.post('/jobs/:id/decline', ah(async (req, res) => {
+    await jobs.decline(db, deviceId(req), req.params.id, { timeZone: config.centerTimezone });
     res.status(204).end();
   }));
 

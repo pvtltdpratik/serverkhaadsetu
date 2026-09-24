@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const { HttpError, asyncHandler, str, num, oneOf, body, deviceId, sendPaged, likePattern } = require('../utils/http');
 const { ORDER_COLUMNS, serializeOrder, findOrder, cancelOrder, withItems } = require('../services/orders');
 const { placeAppOrder } = require('../services/orderPlacement');
+const { normalizePhone } = require('../services/deliveryPartner');
 const { resolveOrigin } = require('../services/location');
 const config = require('../config');
 const { notify } = require('../services/notifications');
@@ -147,14 +148,33 @@ module.exports = (db) => {
     const centerId = str(input.centerId, 'centerId', { max: 100, optional: true });
     const located = await resolveOrigin(db, owner, input);
 
+    // Collect it yourself (the default), or have a delivery partner bring it.
+    const fulfilment = input.fulfilment === undefined ? 'pickup' : oneOf(input.fulfilment, 'fulfilment', ['pickup', 'delivery']);
+    let delivery = null;
+    if (fulfilment === 'delivery') {
+      const a = input.deliveryAddress;
+      if (!a || typeof a !== 'object' || Array.isArray(a)) throw new HttpError(400, '"deliveryAddress" is required for home delivery');
+      const profile = (await db.query('SELECT village FROM profiles WHERE owner_id = $1', [owner])).rows[0];
+      delivery = {
+        latitude: num(a.latitude, 'deliveryAddress.latitude', { min: -90, max: 90 }),
+        longitude: num(a.longitude, 'deliveryAddress.longitude', { min: -180, max: 180 }),
+        phone: normalizePhone(a.phone),
+        label: str(a.label, 'deliveryAddress.label', { max: 200, optional: true }) || '',
+        note: str(a.note, 'deliveryAddress.note', { max: 300, optional: true }) || '',
+        village: str(a.village, 'deliveryAddress.village', { max: 120, optional: true }) || profile?.village || '',
+      };
+    }
+
     const { order, center } = await placeAppOrder(db, {
       owner,
       customerName,
       lines,
       centerId,
-      origin: located ? located.origin : null,
+      // With a delivery the farm itself is the best guide to which center is near.
+      origin: located ? located.origin : delivery ? { latitude: delivery.latitude, longitude: delivery.longitude } : null,
       homeCenterId: located ? located.profile.homeCenterId : null,
       timeZone: config.centerTimezone,
+      delivery,
     });
     res.status(201).json({ ...serializeOrder(order, { includeOtp: true }), center });
   }));

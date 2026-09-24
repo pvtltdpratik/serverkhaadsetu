@@ -5,8 +5,11 @@ const { seedIfEmpty } = require('./db/seed');
 const { createApp } = require('./app');
 const { runReservationMaintenance } = require('./services/reservationJobs');
 const { runReassignment } = require('./services/reassignment');
+const { runDeliveryDispatch } = require('./services/deliveryJobs');
 
 const MAINTENANCE_INTERVAL_MS = 10 * 60 * 1000;
+// Delivery offers are only open for a few minutes, so they are checked far more often.
+const DISPATCH_INTERVAL_MS = 30 * 1000;
 
 const main = async () => {
   if (!config.databaseUrl) {
@@ -33,9 +36,18 @@ const main = async () => {
   const timer = setInterval(maintain, MAINTENANCE_INTERVAL_MS);
   timer.unref();
 
+  // Close unanswered delivery offers, ask the next partners, and put a delivery
+  // nobody took back to plain pickup. Also safe on every instance (advisory lock).
+  const dispatch = () => runDeliveryDispatch(db, { timeZone: config.centerTimezone })
+    .then((r) => { if (r.offered || r.fellBack) console.log(`Deliveries: ${r.offered} offers sent, ${r.fellBack} fell back to pickup`); })
+    .catch((err) => console.error('Delivery dispatch failed:', err.message));
+  const dispatchTimer = setInterval(dispatch, DISPATCH_INTERVAL_MS);
+  dispatchTimer.unref();
+
   // Let in-flight requests finish and return connections before exiting.
   const stop = () => {
     clearInterval(timer);
+    clearInterval(dispatchTimer);
     server.close(() => db.close().then(() => process.exit(0)));
   };
   process.on('SIGTERM', stop);
