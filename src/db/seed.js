@@ -1,3 +1,5 @@
+const { weightFromLabel } = require('../utils/weight');
+
 const HOUR = 3600 * 1000;
 const DAY = 24 * HOUR;
 
@@ -205,9 +207,9 @@ const seedIfEmpty = async (db) => {
 
     for (const p of d.products) {
       await c.query(
-        `INSERT INTO products (id, name, brand, category, price_in_rupees, unit_label, rating, review_count, description, nutrient_focus, npk_percentages)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-        [p.id, p.name, p.brand, p.category, p.priceInRupees, p.unitLabel, p.rating, p.reviewCount, p.description, p.nutrientFocus, JSON.stringify(p.npkPercentages)],
+        `INSERT INTO products (id, name, brand, category, price_in_rupees, unit_label, rating, review_count, description, nutrient_focus, npk_percentages, weight_kg)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [p.id, p.name, p.brand, p.category, p.priceInRupees, p.unitLabel, p.rating, p.reviewCount, p.description, p.nutrientFocus, JSON.stringify(p.npkPercentages), weightFromLabel(p.unitLabel, p.category)],
       );
     }
     for (const r of d.reviews) {

@@ -1,11 +1,12 @@
 const express = require('express');
 const crypto = require('crypto');
-const { HttpError, asyncHandler, str, num, oneOf, bool, isoDate, body, sendPaged, likePattern } = require('../utils/http');
+const { HttpError, asyncHandler, str, num, oneOf, bool, isoDate, body, sendPaged, likePattern, deviceId } = require('../utils/http');
 const { ORDER_COLUMNS, serializeOrder, newOrderId, findOrder, cancelOrder, withItems, insertOrder } = require('../services/orders');
 const { otpLimiter } = require('../middleware/security');
 const { notify } = require('../services/notifications');
 const centers = require('../services/centerService');
 const surplus = require('../services/surplus');
+const partners = require('../services/deliveryPartner');
 const { deductWalkIn, deductWalkInLots, consumeOrderStock } = require('../services/reservations');
 const { checkLowStock } = require('../services/stockAlerts');
 const { notifyBackInStock, notifyNewSurplus } = require('../services/backInStock');
@@ -304,6 +305,50 @@ module.exports = (db, roles) => {
     );
     res.status(201).json((await db.query(
       `SELECT ${RESTOCK_COLUMNS} FROM restock_requests r JOIN products p ON p.id = r.product_id WHERE r.id = $1`, [id])).rows[0]);
+  }));
+
+  // ---- Delivery partners ----
+  // Farmers who asked THIS center to check their papers before they deliver.
+  // Nobody else's applicants are visible here (they are a 404).
+  router.get('/delivery-partners', ah(async (req, res) => {
+    const params = [req.center.centerId];
+    let where = "p.review_center_id = $1 AND p.status <> 'draft'";
+    if (req.query.status) {
+      params.push(oneOf(req.query.status, 'status', partners.STATUSES.filter((s) => s !== 'draft')));
+      where += ` AND p.status = $${params.length}`;
+    }
+    if (req.query.q) {
+      params.push(likePattern(req.query.q));
+      where += ` AND (COALESCE(pr.name, '') || ' ' || COALESCE(p.vehicle_number, '') || ' ' || COALESCE(pr.village, '')) ILIKE $${params.length}`;
+    }
+    await sendPaged(req, res, db, {
+      select: partners.PARTNER_COLUMNS,
+      from: `${partners.PARTNER_FROM} WHERE ${where}`,
+      params,
+      // Waiting for review first, oldest application first, so nobody is left waiting.
+      order: "(p.status = 'pending') DESC, p.submitted_at ASC NULLS LAST, p.user_id",
+      finish: async (rows) => rows.map((r) => partners.toView(r)),
+    });
+  }));
+
+  router.get('/delivery-partners/:userId', ah(async (req, res) => {
+    res.json(await partners.detailFor(db, req.params.userId, { centerId: req.center.centerId }));
+  }));
+
+  // The licence or RC photo, for the operator who has to check it.
+  router.get('/delivery-partners/:userId/documents/:kind', ah(async (req, res) => {
+    await partners.detailFor(db, req.params.userId, { centerId: req.center.centerId }); // 404 unless theirs
+    const doc = await partners.readDocument(db, req.params.userId, req.params.kind);
+    res.set({ 'Content-Type': doc.contentType, 'Cache-Control': 'private, no-store', 'Content-Disposition': 'inline' }).send(doc.data);
+  }));
+
+  router.post('/delivery-partners/:userId/:action', ah(async (req, res) => {
+    const action = oneOf(req.params.action, 'action', ['approve', 'reject', 'suspend', 'reactivate']);
+    const note = str(body(req).note, 'note', { max: 300, optional: true }) || '';
+    res.json(await partners.review(db, {
+      userId: req.params.userId, action, note,
+      actor: { id: deviceId(req), role: 'operator', centerId: req.center.centerId },
+    }));
   }));
 
   // ---- Surplus / second-hand stock ----

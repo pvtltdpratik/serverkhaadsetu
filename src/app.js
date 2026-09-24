@@ -19,6 +19,7 @@ const operatorRouter = require('./routes/operator');
 const adminRouter = require('./routes/admin');
 const meRouter = require('./routes/me');
 const centersRouter = require('./routes/centers');
+const deliveryRouter = require('./routes/delivery');
 const { createRoles } = require('./middleware/roles');
 const { createAccountGuard } = require('./middleware/accountGuard');
 
@@ -54,6 +55,7 @@ const createApp = (db, options = {}) => {
   v1.use('/schemes', schemesRouter(db));
   v1.use('/me', meRouter(db, roles));
   v1.use('/centers', centersRouter(db));
+  v1.use('/delivery', deliveryRouter(db));
   v1.use('/operator', operatorRouter(db, roles));
   v1.use('/admin', adminRouter(db, roles));
   app.use('/v1', v1);

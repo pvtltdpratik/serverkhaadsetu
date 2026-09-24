@@ -6,6 +6,7 @@ const { recordAudit } = require('../services/audit');
 const { withItems, serializeOrder } = require('../services/orders');
 const { notify } = require('../services/notifications');
 const surplus = require('../services/surplus');
+const partners = require('../services/deliveryPartner');
 
 const CENTER_STATUSES = ['active', 'suspended'];
 const ACCOUNT_STATUSES = ['active', 'suspended'];
@@ -294,6 +295,50 @@ module.exports = (db, roles) => {
       await recordAudit(c, req, { action: 'discrepancy.resolve', targetType: 'discrepancy', targetId: req.params.id, details: { centerId: rows[0].center_id, productId: rows[0].product_id, note } });
     });
     res.json({ id: req.params.id, status: 'resolved' });
+  }));
+
+  // ---- Delivery partners ----
+  // Every farmer who applied to deliver, whichever center is checking them.
+  router.get('/delivery-partners', ah(async (req, res) => {
+    const params = [];
+    const where = ["p.status <> 'draft'"];
+    if (req.query.status) {
+      params.push(oneOf(req.query.status, 'status', partners.STATUSES.filter((s) => s !== 'draft')));
+      where.push(`p.status = $${params.length}`);
+    }
+    if (req.query.centerId) {
+      params.push(String(req.query.centerId));
+      where.push(`p.review_center_id = $${params.length}`);
+    }
+    if (req.query.q) {
+      params.push(likePattern(req.query.q));
+      where.push(`(COALESCE(pr.name, '') || ' ' || COALESCE(p.vehicle_number, '') || ' ' || COALESCE(pr.village, '')) ILIKE $${params.length}`);
+    }
+    await sendPaged(req, res, db, {
+      select: partners.PARTNER_COLUMNS,
+      from: `${partners.PARTNER_FROM} WHERE ${where.join(' AND ')}`,
+      params,
+      order: "(p.status = 'pending') DESC, p.submitted_at ASC NULLS LAST, p.user_id",
+      finish: async (rows) => rows.map((r) => partners.toView(r)),
+    });
+  }));
+
+  router.get('/delivery-partners/:userId', ah(async (req, res) => res.json(await partners.detailFor(db, req.params.userId))));
+
+  router.get('/delivery-partners/:userId/documents/:kind', ah(async (req, res) => {
+    const doc = await partners.readDocument(db, req.params.userId, req.params.kind);
+    res.set({ 'Content-Type': doc.contentType, 'Cache-Control': 'private, no-store', 'Content-Disposition': 'inline' }).send(doc.data);
+  }));
+
+  // Approve, reject, suspend or reactivate; the platform can do what a center's operator can, for anyone.
+  router.post('/delivery-partners/:userId/:action', ah(async (req, res) => {
+    const action = oneOf(req.params.action, 'action', ['approve', 'reject', 'suspend', 'reactivate']);
+    const note = str(body(req).note, 'note', { max: 300, optional: true }) || '';
+    res.json(await partners.review(db, {
+      userId: req.params.userId, action, note,
+      actor: { id: deviceId(req), role: 'admin' },
+      after: (tx) => recordAudit(tx, req, { action: `delivery_partner.${action}`, targetType: 'delivery_partner', targetId: req.params.userId, details: { note } }),
+    }));
   }));
 
   // ---- Surplus / second-hand stock ----

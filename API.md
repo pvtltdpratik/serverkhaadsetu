@@ -521,3 +521,27 @@ Tips:
 1. Wrap non-2xx responses as `throw Exception(jsonDecode(body)['error'])` so the existing error UIs show the server message (the OTP screen already expects a message like this).
 2. The Drift tables for orders, restock requests and scheme applications become an offline cache/queue only; the server is now the source of truth. Since the village-center app is offline-first, decide later whether to queue writes locally and sync when online (the server has no sync/conflict endpoint yet).
 3. **New capabilities with no UI yet:** placing an order (`POST /v1/orders`), farmer order list/cancel, posting reviews/posts/replies, likes, profile editing, scheme applications list, `/earnings/summary`.
+
+---
+
+## 12. Delivery partners (farmers who deliver for other farmers)
+
+A delivery partner is an ordinary farmer with one switch on: there is no separate login. The application walks through a review: `draft -> pending -> approved`, or `pending -> rejected -> draft`, and `approved <-> suspended`. Changing the vehicle, number, capacity, phone or checking center (or uploading a new paper) sends an **approved** partner back to `pending` and takes them offline; the distance and free hours are theirs to change any time.
+
+Products now carry `weightKg` (from the unit label, e.g. "40 kg bag" -> 40) so a delivery can be matched to a vehicle that can carry it.
+
+### Farmer - `/v1/delivery`
+- `GET /partner` -> `{status, vehicleType, vehicleLabel, vehicleNumber, capacityKg, phone, maxDistanceKm, days:[0..6] (0 = Monday), freeFrom, freeUntil, online, reviewCenterId, reviewCenterName, rejectionReason, ratingAvg, ratingCount, deliveriesDone, documents:{licence, rc} (each null or {contentType, sizeBytes, uploadedAt}), missing:[...], canSubmit}`. `status:"none"` if never applied.
+- `PUT /partner` (send only what changed) `{vehicleType: bike|pickup|tractor, vehicleNumber, capacityKg, phone, maxDistanceKm 1-50, days, freeFrom, freeUntil, reviewCenterId}`. The number is tidied (`mh 12 ab 3456` -> `MH12AB3456`), the phone is an Indian mobile (`+91` ok), and the capacity must be believable for the vehicle (bike 5-80 kg, pickup 100-1500, tractor 500-8000). `403` while suspended.
+- `POST /partner/documents/licence|rc` multipart field `file`: a JPEG/PNG/WebP photo or a PDF up to 5 MB, judged by its bytes (`422` otherwise, `413` too large). Stored privately.
+- `GET /partner/documents/licence|rc` -> your own file back (`Cache-Control: private, no-store`).
+- `POST /partner/submit` -> `pending`. `400 {code:"incomplete", missing:[...]}` lists what is missing; `400 {code:"no_center"}` if no center can be found to check him (set a location or send `reviewCenterId`); `409` if that vehicle number is already registered by another active partner, or he already applied. The center is his chosen one, else his home center, else the nearest working one within 35 km. That center's operator is notified.
+- `PUT /partner/online` `{online:bool}` - the "I am free now" switch; approved partners only (`403`).
+- `DELETE /partner` -> `204`; removes the application and the papers.
+
+### Operator - `/v1/operator/delivery-partners` (only farmers who applied to THIS center; others are `404`)
+- `GET ?status=pending|approved|rejected|suspended&q=` -> newest-waiting first (pending, oldest application first). `GET /:userId` -> the partner view plus `events` (history). `GET /:userId/documents/licence|rc` -> the file.
+- `POST /:userId/approve|reject|suspend|reactivate` `{note}`. `reject` and `suspend` need a `note` (the farmer sees it). `409` if the state does not allow it. The farmer is notified (`type:"delivery"`).
+
+### Admin - `/v1/admin/delivery-partners`
+Same as the operator's, across every center (`?centerId=` filters), and each action is written to the audit log as `delivery_partner.<action>`.

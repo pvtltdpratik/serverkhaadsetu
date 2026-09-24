@@ -11,7 +11,7 @@ const { subscribe, unsubscribe, isSubscribed } = require('../services/backInStoc
 const CATEGORIES = ['fertilizer', 'organic', 'pesticide', 'seed', 'equipment'];
 const NUTRIENTS = ['nitrogen', 'phosphorus', 'potassium'];
 
-const PRODUCT_COLUMNS = `id, name, brand, category, price_in_rupees AS "priceInRupees", unit_label AS "unitLabel",
+const PRODUCT_COLUMNS = `id, name, brand, category, price_in_rupees AS "priceInRupees", unit_label AS "unitLabel", weight_kg AS "weightKg",
   rating, review_count AS "reviewCount", description, nutrient_focus AS "nutrientFocus", npk_percentages AS "npkPercentages"`;
 const REVIEW_COLUMNS = 'id, product_id AS "productId", author_name AS "authorName", rating, comment, date';
 
