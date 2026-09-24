@@ -4,6 +4,8 @@ const { asyncHandler, str, num, body, deviceId } = require('../utils/http');
 const partners = require('../services/deliveryPartner');
 const jobs = require('../services/deliveryJobs');
 const flow = require('../services/deliveryFlow');
+const trips = require('../services/deliveryTrips');
+const p2p = require('../services/deliveryP2p');
 const { otpLimiter } = require('../middleware/security');
 const { resolveOrigin } = require('../services/location');
 const { HttpError } = require('../utils/http');
@@ -102,7 +104,7 @@ module.exports = (db) => {
     let partnersFree = 0;
     if (!priced.tooFar) {
       partnersFree = (await jobs.eligiblePartners(db, {
-        job: { weightKg: priced.weightKg, requesterId: deviceId(req), roadKm: priced.roadKm, pickup: center }, now: new Date(), timeZone: config.centerTimezone,
+        job: { weightKg: priced.weightKg, requesterId: deviceId(req), roadKm: priced.roadKm, pickup: center, drop }, now: new Date(), timeZone: config.centerTimezone,
       })).length;
     }
     res.json({
@@ -158,6 +160,51 @@ module.exports = (db) => {
     const input = body(req);
     await flow.rate(db, {
       jobId: req.params.id, raterId: deviceId(req), role: 'partner_to_buyer',
+      stars: num(input.stars, 'stars', { min: 1, max: 5, integer: true }),
+      comment: str(input.comment, 'comment', { max: 300, optional: true }) || '',
+    });
+    res.status(204).end();
+  }));
+
+  // ---- Trips: "I am going there on this day and have room" ----
+  // Only approved partners post them. Farmers look at the board and book room on one
+  // (see POST /p2p with a tripId); orders along the same road are offered to him first.
+  router.get('/trips', ah(async (req, res) => res.json(await trips.listMine(db, deviceId(req), { timeZone: config.centerTimezone }))));
+  router.post('/trips', ah(async (req, res) => {
+    const input = body(req);
+    res.status(201).json(await trips.createTrip(db, deviceId(req), {
+      from: input.from, to: input.to, date: input.date, spareKg: input.spareKg, note: input.note,
+    }, { timeZone: config.centerTimezone }));
+  }));
+  router.delete('/trips/:id', ah(async (req, res) => {
+    await trips.cancelTrip(db, deviceId(req), req.params.id, { timeZone: config.centerTimezone });
+    res.status(204).end();
+  }));
+  // Trips others have posted, that start near me (latitude/longitude, or my saved village).
+  router.get('/trips/board', ah(async (req, res) => {
+    const located = await resolveOrigin(db, deviceId(req), req.query);
+    const weightKg = req.query.weightKg === undefined ? 0 : num(Number(req.query.weightKg), 'weightKg', { min: 0, max: 5000 });
+    res.json(await trips.board(db, {
+      near: located ? located.origin : null, viewerId: deviceId(req), weightKg, timeZone: config.centerTimezone,
+    }));
+  }));
+
+  // ---- Farmer to farmer: carry a load from my place to another farm ----
+  router.post('/p2p/quote', ah(async (req, res) => res.json(await p2p.quote(db, deviceId(req), body(req), { timeZone: config.centerTimezone }))));
+  router.post('/p2p', ah(async (req, res) => res.status(201).json(await p2p.create(db, deviceId(req), body(req), { timeZone: config.centerTimezone }))));
+  router.get('/p2p', ah(async (req, res) => res.json(await p2p.mine(db, deviceId(req)))));
+  router.get('/p2p/:id', ah(async (req, res) => res.json(await p2p.get(db, deviceId(req), req.params.id))));
+  router.post('/p2p/:id/cancel', ah(async (req, res) => res.json(await p2p.cancel(db, deviceId(req), req.params.id))));
+  // The partner reads his handover code; I type it here, and the load is his.
+  router.post('/p2p/:id/handover', otpLimiter, ah(async (req, res) => {
+    const otp = str(body(req).otp, 'otp', { min: 4, max: 4 });
+    res.json(await flow.handoverByRequester(db, { jobId: req.params.id, requesterId: deviceId(req), otp }));
+  }));
+  router.post('/p2p/:id/rate', ah(async (req, res) => {
+    const input = body(req);
+    await p2p.get(db, deviceId(req), req.params.id);
+    await flow.rate(db, {
+      jobId: req.params.id, raterId: deviceId(req), role: 'buyer_to_partner',
       stars: num(input.stars, 'stars', { min: 1, max: 5, integer: true }),
       comment: str(input.comment, 'comment', { max: 300, optional: true }) || '',
     });

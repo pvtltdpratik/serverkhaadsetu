@@ -6,6 +6,7 @@ const { haversineKm, boundingBox } = require('./geo');
 const { roadKm, computeFee, suggestVehicle, etaMinutes } = require('./deliveryFee');
 const partners = require('./deliveryPartner');
 const { SERVICEABLE } = require('./centerService');
+const trips = require('./deliveryTrips');
 
 const D = config.delivery;
 const MIN = 60 * 1000;
@@ -38,50 +39,84 @@ const weightOf = async (q, items) => {
   return Math.round(total * 100) / 100;
 };
 
-// What delivering `items` from `center` to `drop` costs, or why it cannot be done.
-const priceDelivery = async (q, { center, items, drop }) => {
-  const weightKg = await weightOf(q, items);
-  const straightKm = haversineKm(center, drop);
-  const km = roadKm(straightKm);
+// What carrying `weightKg` from one place to another costs, or that it is too far.
+const priceRoute = ({ from, to, weightKg }) => {
+  const km = roadKm(haversineKm(from, to));
   const tooFar = km > D.maxRoadKm;
   return {
-    centerId: center.centerId, weightKg, roadKm: km, tooFar, maxRoadKm: D.maxRoadKm,
+    weightKg, roadKm: km, tooFar, maxRoadKm: D.maxRoadKm,
     fee: tooFar ? null : computeFee({ roadKm: km, weightKg }),
     suggestedVehicle: suggestVehicle(weightKg),
   };
 };
 
+// What delivering `items` from `center` to `drop` costs, or why it cannot be done.
+const priceDelivery = async (q, { center, items, drop }) => ({
+  centerId: center.centerId,
+  ...priceRoute({ from: center, to: drop, weightKg: await weightOf(q, items) }),
+});
+
 // ---------------------------------------------------------------------------
 // Who can take a job
 // ---------------------------------------------------------------------------
 
-// Approved partners who are free right now, carry this much, are willing to go this
-// far and are not already busy, nearest to the pickup first (then the better rated).
-// `job` needs {weightKg, requesterId, pickup, roadKm}; `jobId` (if any) excludes
-// partners who already had an offer for it.
+// What he is already carrying (assigned or on the road), in kg.
+const carriedKg = async (q, partnerId) => Number((await q.query(
+  "SELECT COALESCE(SUM(weight_kg), 0) AS kg FROM delivery_job WHERE partner_id = $1 AND status IN ('assigned','in_transit')", [partnerId])).rows[0].kg);
+
+// Approved partners who can take this job, best first:
+//  1. those with a trip today along this road (they are going that way anyway),
+//  2. those who already have a not-yet-collected job going the same way (a batch),
+//  3. then the nearest free ones, and the better rated.
+// A partner qualifies when his vehicle carries this load ON TOP of what he already
+// has, he is free now and willing to go this far, and he is not too busy.
+// `job` needs {weightKg, requesterId, pickup, roadKm}; add `drop` for batching and
+// trips. `jobId` (if any) excludes partners who already had an offer for it.
 const eligiblePartners = async (q, { job, jobId = null, now, timeZone }) => {
   const { rows } = await q.query(
     `SELECT p.user_id AS "userId", p.status, p.vehicle_type AS "vehicleType", p.capacity_kg AS "capacityKg",
             p.max_distance_km AS "maxDistanceKm", p.days AS "daysMask",
             to_char(p.free_from, 'HH24:MI') AS "freeFrom", to_char(p.free_until, 'HH24:MI') AS "freeUntil",
             p.online, p.rating_avg AS "ratingAvg",
-            COALESCE(p.latitude, pr.latitude) AS latitude, COALESCE(p.longitude, pr.longitude) AS longitude
+            COALESCE(p.latitude, pr.latitude) AS latitude, COALESCE(p.longitude, pr.longitude) AS longitude,
+            COALESCE((SELECT SUM(j.weight_kg) FROM delivery_job j WHERE j.partner_id = p.user_id AND j.status IN ('assigned','in_transit')), 0) AS "carryingKg",
+            (SELECT count(*)::int FROM delivery_job j WHERE j.partner_id = p.user_id AND j.status IN ('assigned','in_transit')) AS "activeJobs"
        FROM delivery_partner p LEFT JOIN profiles pr ON pr.owner_id = p.user_id
-      WHERE p.status = 'approved' AND p.online AND p.capacity_kg >= $1 AND p.user_id <> $2
-        AND ($3::text IS NULL OR NOT EXISTS (SELECT 1 FROM delivery_offer o WHERE o.job_id = $3 AND o.partner_id = p.user_id AND o.status <> 'closed'))
-        AND (SELECT count(*) FROM delivery_job j WHERE j.partner_id = p.user_id AND j.status IN ('assigned','in_transit')) < $4`,
-    [job.weightKg, job.requesterId, jobId, D.maxActiveJobs],
+      WHERE p.status = 'approved' AND p.user_id <> $1
+        AND ($2::text IS NULL OR NOT EXISTS (SELECT 1 FROM delivery_offer o WHERE o.job_id = $2 AND o.partner_id = p.user_id AND o.status <> 'closed'))`,
+    [job.requesterId, jobId],
   );
+  const fits = (p) => p.activeJobs < D.maxActiveJobs && p.capacityKg - Number(p.carryingKg) >= job.weightKg;
+
+  // Jobs he has taken but not yet collected: a new one going the same way can ride along.
+  const assigned = job.drop && rows.length
+    ? (await q.query(
+      `SELECT partner_id AS "partnerId", pickup_latitude AS "pl", pickup_longitude AS "pn", drop_latitude AS "dl", drop_longitude AS "dn"
+         FROM delivery_job WHERE status = 'assigned' AND partner_id = ANY($1)`, [rows.map((r) => r.userId)])).rows
+    : [];
+  const rides = (p) => assigned.some((a) => a.partnerId === p.userId
+    && haversineKm({ latitude: a.pl, longitude: a.pn }, job.pickup) <= D.batchKm
+    && haversineKm({ latitude: a.dl, longitude: a.dn }, job.drop) <= D.batchKm);
+
+  const tripUsers = new Set((await trips.tripPartnersFor(q, { job, now, timeZone })).map((t) => t.userId));
+
   return rows
-    .filter((p) => p.latitude != null && partners.availabilityAt({ ...p, daysMask: p.daysMask }, now, timeZone).free)
-    .map((p) => ({ ...p, toPickupKm: roadKm(haversineKm(p, job.pickup)), ratingAvg: Number(p.ratingAvg) }))
-    .filter((p) => p.toPickupKm <= p.maxDistanceKm && job.roadKm <= p.maxDistanceKm)
-    .sort((a, b) => a.toPickupKm - b.toPickupKm || b.ratingAvg - a.ratingAvg || (a.userId < b.userId ? -1 : 1));
+    .filter((p) => fits(p) && p.latitude != null)
+    .map((p) => ({
+      ...p, toPickupKm: roadKm(haversineKm(p, job.pickup)), ratingAvg: Number(p.ratingAvg),
+      onTrip: tripUsers.has(p.userId), batch: rides(p),
+    }))
+    .filter((p) => p.onTrip || (
+      partners.availabilityAt({ ...p, daysMask: p.daysMask }, now, timeZone).free
+      && p.toPickupKm <= p.maxDistanceKm && job.roadKm <= p.maxDistanceKm))
+    .sort((a, b) => Number(b.onTrip) - Number(a.onTrip) || Number(b.batch) - Number(a.batch)
+      || a.toPickupKm - b.toPickupKm || b.ratingAvg - a.ratingAvg || (a.userId < b.userId ? -1 : 1));
 };
 
 const jobSpec = (row) => ({
   weightKg: Number(row.weight_kg), requesterId: row.requester_id, roadKm: Number(row.distance_km),
   pickup: { latitude: row.pickup_latitude, longitude: row.pickup_longitude },
+  drop: { latitude: row.drop_latitude, longitude: row.drop_longitude },
 });
 
 // ---------------------------------------------------------------------------
@@ -134,12 +169,39 @@ const dispatchRound = async (c, jobId, { now = new Date(), timeZone = config.cen
     "SELECT count(*)::int AS pending FROM delivery_offer WHERE job_id = $1 AND status = 'pending' AND expires_at > $2", [job.id, now]);
   if (pending > 0) return { offered: 0 };
 
+  // Booked onto someone's trip: he is asked first, and the offer waits for him
+  // (until the search ends). Only if he turns it down does the general pool see it.
+  if (job.trip_id) {
+    const { rows: [t] } = await c.query("SELECT partner_id FROM delivery_trip WHERE id = $1 AND status = 'open'", [job.trip_id]);
+    const { rowCount: asked } = t
+      ? await c.query("SELECT 1 FROM delivery_offer WHERE job_id = $1 AND partner_id = $2 AND status <> 'closed'", [job.id, t.partner_id])
+      : { rowCount: 1 };
+    if (t && !asked) {
+      await c.query(
+        'INSERT INTO delivery_offer (job_id, partner_id, round, offered_at, expires_at) VALUES ($1,$2,1,$3,$4)',
+        [job.id, t.partner_id, now, job.search_until]);
+      await c.query('UPDATE delivery_job SET rounds = 1 WHERE id = $1', [job.id]);
+      await notify(c, t.partner_id, {
+        type: 'delivery', title: `Someone booked room on your trip: Rs ${money(job.fee)}`,
+        body: `${Number(job.weight_kg)} kg from ${job.pickup_label || 'a farm'} to ${job.drop_village || job.drop_label || 'a farm'}. Open the app to accept.`, refId: job.id,
+      });
+      return { offered: 1 };
+    }
+  }
+
   const candidates = (await eligiblePartners(c, { job: jobSpec(job), jobId: job.id, now, timeZone })).slice(0, D.offersPerRound);
   if (!candidates.length) {
     // Nobody free right now. Keep looking until the deadline, but ask the operator
     // to step in once so a person can phone around.
     if (!job.operator_told_at) {
       await c.query('UPDATE delivery_job SET operator_told_at = $2 WHERE id = $1', [job.id, now]);
+      // A farmer-to-farmer job has no center: the sender is the one to hear it.
+      if (!job.center_id) {
+        await notify(c, job.requester_id, {
+          type: 'delivery', title: 'No delivery partner is free yet',
+          body: 'We are still looking. If nobody is found in time we will tell you.', refId: job.id,
+        });
+      }
       await tellOperator(c, job.center_id, {
         title: 'A delivery needs a driver',
         body: `No delivery partner is free for ${Number(job.weight_kg)} kg to ${job.drop_village || 'a farm'} (${Number(job.distance_km)} km). You can assign someone yourself.`,
@@ -160,7 +222,7 @@ const dispatchRound = async (c, jobId, { now = new Date(), timeZone = config.cen
     await notify(c, p.userId, {
       type: 'delivery',
       title: `Delivery job: Rs ${money(job.fee)}`,
-      body: `${Number(job.weight_kg)} kg from ${job.pickup_label} to ${job.drop_village || 'a farm'}, ${Number(job.distance_km)} km. ${p.toPickupKm} km to the pickup. Open the app to accept.`,
+      body: `${Number(job.weight_kg)} kg from ${job.pickup_label || 'a farm'} to ${job.drop_village || 'a farm'}, ${Number(job.distance_km)} km. ${p.toPickupKm} km to the pickup.${p.batch ? ' It goes the same way as a job you already have.' : ''}${p.onTrip ? ' It is along your trip today.' : ''} Open the app to accept.`,
       refId: job.id,
     });
   }
@@ -173,6 +235,12 @@ const fallback = async (c, job, reason) => {
   await c.query("UPDATE delivery_job SET status = 'fallback', cancelled_at = now(), cancelled_reason = $2 WHERE id = $1", [job.id, reason]);
   await c.query("UPDATE delivery_offer SET status = 'expired', responded_at = now() WHERE job_id = $1 AND status = 'pending'", [job.id]);
   if (job.order_id) await backToPickup(c, job, 'no_partner');
+  else {
+    await notify(c, job.requester_id, {
+      type: 'delivery', title: 'No delivery partner was free',
+      body: 'Nobody could carry your load in time. You can ask again, or look at the trips other farmers have posted.', refId: job.id,
+    });
+  }
 };
 
 // Puts a delivery order back to "collect at the center" and tells the buyer their code.
@@ -232,7 +300,11 @@ const assign = async (c, job, partnerRow, { by, now = new Date() }) => {
      ON CONFLICT (job_id, partner_id) DO UPDATE SET status = 'accepted', responded_at = EXCLUDED.responded_at`,
     [job.id, partnerRow.userId, job.rounds, now]);
   await c.query("UPDATE delivery_offer SET status = 'closed', responded_at = $2 WHERE job_id = $1 AND status = 'pending' AND partner_id <> $3", [job.id, now, partnerRow.userId]);
-  await notify(c, job.requester_id, {
+  const p2p = job.kind === 'p2p';
+  await notify(c, job.requester_id, p2p ? {
+    type: 'delivery', title: 'A delivery partner is coming to collect your load',
+    body: `${partnerLine(partnerRow)} will pick it up. Ask for their handover code before you give it, and keep your delivery code for the receiver.`, refId: job.id,
+  } : {
     type: 'delivery', title: 'A delivery partner is on the way to the center',
     body: `${partnerLine(partnerRow)} will bring your order. Keep your delivery code ready.`, refId: job.order_id,
   });
@@ -240,10 +312,41 @@ const assign = async (c, job, partnerRow, { by, now = new Date() }) => {
     title: 'A delivery partner is coming for an order',
     body: `${partnerLine(partnerRow)} will collect it. Check their handover code before you give the goods.`, refId: job.order_id,
   });
+  await offerAlong(c, partnerRow, job, now);
   if (by === 'operator') {
     await notify(c, partnerRow.userId, {
       type: 'delivery', title: 'You were given a delivery job',
       body: `The village center assigned you ${Number(job.weight_kg)} kg from ${job.pickup_label} to ${job.drop_village || 'a farm'}. Rs ${money(job.fee)}.`, refId: job.id,
+    });
+  }
+};
+
+// He has taken a job: other open jobs that go the same way, and still fit in the
+// vehicle, are offered to him too, so one trip can serve several farms.
+const offerAlong = async (c, partnerRow, taken, now) => {
+  if ((await activeJobCount(c, partnerRow.userId)) >= D.maxActiveJobs) return;
+  const room = partnerRow.capacityKg - (await carriedKg(c, partnerRow.userId));
+  if (room <= 0) return;
+  const { rows } = await c.query(
+    `SELECT * FROM delivery_job j WHERE j.status = 'open' AND j.id <> $1 AND j.trip_id IS NULL AND j.requester_id <> $2
+        AND j.weight_kg <= $3 AND j.search_until > $4
+        AND NOT EXISTS (SELECT 1 FROM delivery_offer o WHERE o.job_id = j.id AND o.partner_id = $2 AND o.status <> 'closed')
+      ORDER BY j.created_at FOR UPDATE OF j SKIP LOCKED`, [taken.id, partnerRow.userId, room, now]);
+  const here = { latitude: taken.pickup_latitude, longitude: taken.pickup_longitude };
+  const there = { latitude: taken.drop_latitude, longitude: taken.drop_longitude };
+  const along = rows.filter((j) =>
+    haversineKm(here, { latitude: j.pickup_latitude, longitude: j.pickup_longitude }) <= D.batchKm
+    && haversineKm(there, { latitude: j.drop_latitude, longitude: j.drop_longitude }) <= D.batchKm).slice(0, 2);
+  for (const j of along) {
+    await c.query(
+      `INSERT INTO delivery_offer (job_id, partner_id, round, offered_at, expires_at) VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (job_id, partner_id) DO UPDATE SET status = 'pending', round = EXCLUDED.round, offered_at = EXCLUDED.offered_at,
+         expires_at = EXCLUDED.expires_at, responded_at = NULL`,
+      [j.id, partnerRow.userId, j.rounds + 1, now, new Date(now.getTime() + D.offerMinutes * MIN)]);
+    await c.query('UPDATE delivery_job SET rounds = rounds + 1 WHERE id = $1', [j.id]);
+    await notify(c, partnerRow.userId, {
+      type: 'delivery', title: `Take one more on the same trip: Rs ${money(j.fee)}`,
+      body: `${Number(j.weight_kg)} kg from the same place to ${j.drop_village || 'a farm nearby'}. You have room for it. Open the app to add it.`, refId: j.id,
     });
   }
 };
@@ -265,6 +368,10 @@ const accept = async (db, partnerId, jobId, { now = new Date() } = {}) => {
     if (!row || row.status !== 'approved') throw new HttpError(403, 'You are not approved to deliver');
     if (row.capacityKg < Number(job.weight_kg)) throw new HttpError(409, 'This load is heavier than your vehicle can carry');
     if ((await activeJobCount(c, partnerId)) >= D.maxActiveJobs) throw new HttpError(409, 'Finish your current delivery before taking another');
+    const carrying = await carriedKg(c, partnerId);
+    if (row.capacityKg - carrying < Number(job.weight_kg)) {
+      throw new HttpError(409, `Your vehicle carries ${row.capacityKg} kg and you already have ${carrying} kg to deliver, so this ${Number(job.weight_kg)} kg load does not fit`);
+    }
     await assign(c, job, partners.toView(row), { by: 'partner', now });
   });
   return jobForPartner(db, partnerId, jobId);
@@ -341,7 +448,9 @@ const partnerJobView = async (q, row, { partnerId, now = new Date(), full }) => 
     fee: money(row.fee),
     weightKg: Number(row.weight_kg),
     distanceKm: Number(row.distance_km),
-    items: await itemsSummary(q, row.order_id),
+    items: row.kind === 'p2p' ? row.description : await itemsSummary(q, row.order_id),
+    feePayer: row.fee_payer,
+    tripId: row.trip_id,
     pickup: { label: row.pickup_label, centerName: row.center_name, village: row.center_village, latitude: row.pickup_latitude, longitude: row.pickup_longitude },
     drop: { village: row.drop_village },
     mine: own,
@@ -350,10 +459,13 @@ const partnerJobView = async (q, row, { partnerId, now = new Date(), full }) => 
   if (own && ['assigned', 'in_transit', 'delivered'].includes(row.status)) {
     view.drop = { village: row.drop_village, label: row.drop_label, latitude: row.drop_latitude, longitude: row.drop_longitude, phone: row.drop_phone, note: row.drop_note };
     view.buyerName = row.buyer_name;
+    if (row.kind === 'p2p') view.pickup = { ...view.pickup, phone: row.pickup_phone, note: '' };
     // The code he reads to the operator to get the goods; only he ever sees it.
     view.handoverCode = row.status === 'assigned' ? row.pickup_otp : null;
     // What he collects from the buyer in cash, and what of it is his.
     view.cashToCollect = money(row.goods_amount) + money(row.fee);
+    // Who hands him the fee: the buyer at the drop, or (farmer-to-farmer) whoever agreed to pay it.
+    view.collectFeeFrom = row.kind === 'p2p' ? row.fee_payer : 'receiver';
     view.goodsAmount = money(row.goods_amount);
     view.centerPhone = row.center_phone || '';
     view.assignedAt = row.assigned_at;
@@ -391,7 +503,7 @@ const activeFor = async (q, partnerId) => {
 };
 
 module.exports = {
-  D, newOtp, closeJob, cancelJobForOrder, weightOf, priceDelivery, eligiblePartners, jobSpec, createForOrder, dispatchRound, fallback, backToPickup,
+  D, priceRoute, carriedKg, offerAlong, newOtp, closeJob, cancelJobForOrder, weightOf, priceDelivery, eligiblePartners, jobSpec, createForOrder, dispatchRound, fallback, backToPickup,
   runDeliveryDispatch, accept, decline, assign, activeJobCount, offersFor, activeFor, jobForPartner, centerOf, tellOperator,
   JOB_SELECT, JOB_FROM, partnerJobView,
 };

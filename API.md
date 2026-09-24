@@ -577,3 +577,22 @@ Same as the operator's, across every center (`?centerId=` filters), and each act
 **Codes.** `pickup` code: the partner shows it, the operator types it. `drop` code: the buyer shows it, the partner types it. Neither is ever returned to the operator. Five wrong tries in a row lock that step for 15 minutes (`429`); every wrong try says how many are left (`attemptsLeft`). Cancelling an order ends its delivery unless the goods are already on the road (`409`).
 
 **Admin**: `GET /v1/admin/deliveries?status=&centerId=` (same rows plus `centerName`). Rate limits are `RATE_LIMIT_PER_MINUTE` (300) and `RATE_LIMIT_OTP` (10 per 15 min).
+
+### 12.1 Batching, trips and farmer-to-farmer carriage
+
+**Batching.** One partner may carry several jobs (`DELIVERY_MAX_ACTIVE_JOBS`, default 3) as long as the loads fit his vehicle *together* (`409 ... does not fit` otherwise). A new job is offered first to a partner who already has a not-yet-collected job going the same way (pickup and drop each within `DELIVERY_BATCH_KM`, default 4). When a partner accepts a job, other open jobs along the same road that still fit are offered to him too ("Take one more on the same trip"). Each order keeps its own handover code and drop code; `GET /jobs/active` returns the whole trip.
+
+**Trips (`/v1/delivery/trips`, approved partners only).** "I am going there on this day and have room."
+- `POST /trips {from:{latitude,longitude,label?}, to:{...}, date:"YYYY-MM-DD", spareKg, note?}` (201). Today up to 14 days ahead; `spareKg` up to the vehicle's capacity; at most 10 open trips.
+- `GET /trips` my coming trips (`usedKg`, `leftKg`, `bookings`). `DELETE /trips/:id` (204): bookings not yet accepted go back to the general pool and their senders are told; `409` once he has accepted one.
+- `GET /trips/board?latitude=&longitude=&weightKg=` trips that start within 25 km of me, have room, and are not mine (partner name, vehicle, rating, `leftKg`, `fromKm`).
+- A center delivery whose pickup and drop are each within `DELIVERY_TRIP_MATCH_KM` (8) of a partner's trip **today** is offered to that partner first, even if he is not "free now".
+
+**Farmer to farmer (`/v1/delivery/p2p`).** A load carried from one farm to another; no center, no order, no goods money.
+- `POST /p2p/quote {from, to, weightKg}` -> `{available, fee, roadKm, partnersFree, note, payment}`.
+- `POST /p2p {from:{latitude,longitude,label?,phone}, to:{latitude,longitude,label?,village?,phone,note?}, weightKg, description, feePayer:"sender"|"receiver", tripId?}` (201) -> the sender's tracking view (same shape as a buyer's delivery, `kind:"p2p"`, plus `description`, `feePayer`, `receiverPhone`, `canCancel`). With a `tripId` the load is booked on that trip: only its owner is asked, and his offer stays open until the trip day ends (`409` if the trip is full, gone, yours, or does not pass within 8 km of both places). At most 5 requests running per person.
+- `GET /p2p`, `GET /p2p/:id`, `POST /p2p/:id/cancel` (until it is on the road), `POST /p2p/:id/rate {stars, comment?}`.
+- **Codes.** The partner sees a `handoverCode`; the **sender** types it at `POST /p2p/:id/handover {otp}` when giving the load. The sender also holds the `dropCode` and tells it to the receiver, who reads it to the partner on arrival (the receiver needs no app). The partner enters it with the normal `POST /jobs/:id/deliver`. Same lockout as center deliveries.
+- **Money.** The fee is paid in cash to the partner by whoever `feePayer` says: the sender at the pickup or the receiver on arrival (the partner's job view says `collectFeeFrom`). It goes into the wallet as `fee_earned`; nothing is owed to any center. Nobody free in time: the job ends as `fallback` and the sender is told.
+
+Admin: `GET /v1/admin/deliveries?kind=center_order|p2p`.

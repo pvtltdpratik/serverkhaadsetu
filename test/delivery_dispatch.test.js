@@ -1,5 +1,7 @@
 process.env.NODE_ENV = 'test';
 process.env.SUPABASE_URL = '';
+// These tests follow one job at a time; batching has its own test file.
+process.env.DELIVERY_MAX_ACTIVE_JOBS = '1';
 // This file sets up many partners in a few seconds, from one address.
 process.env.RATE_LIMIT_PER_MINUTE = '100000';
 

@@ -95,6 +95,26 @@ const handover = async (db, { jobId, centerId, otp, now = new Date() }) => {
   return operatorJobView(db, jobId);
 };
 
+// A farmer-to-farmer load: the SENDER types the partner's handover code.
+const handoverByRequester = async (db, { jobId, requesterId, otp, now = new Date() }) => {
+  await guarded(db, async (c) => {
+    const { rows: [job] } = await c.query("SELECT * FROM delivery_job WHERE id = $1 AND kind = 'p2p' FOR UPDATE", [jobId]);
+    if (!job || job.requester_id !== requesterId) throw new HttpError(404, 'Request not found');
+    if (job.status === 'open') throw new HttpError(409, 'No delivery partner has taken this yet');
+    if (job.status === 'in_transit') throw new HttpError(409, 'This was already handed over');
+    if (job.status !== 'assigned') throw new HttpError(409, `This request is ${job.status === 'delivered' ? 'already done' : 'not active'}`);
+    const wrong = await judgeCode(c, job, 'pickup', otp, now);
+    if (wrong) return { wrong };
+    await c.query("UPDATE delivery_job SET status = 'in_transit', picked_up_at = $2 WHERE id = $1", [job.id, now]);
+    await notify(c, job.partner_id, {
+      type: 'delivery', title: 'Handed over: on your way',
+      body: `Take it to ${job.drop_village || job.drop_label || 'the receiver'}. The receiver will give you the delivery code.`, refId: job.id,
+    });
+    return {};
+  });
+  return requesterView(db, jobId);
+};
+
 // ---------------------------------------------------------------------------
 // At the farm: the partner delivers
 // ---------------------------------------------------------------------------
@@ -112,6 +132,15 @@ const deliver = async (db, { jobId, partnerId, otp, now = new Date() }) => {
     if (wrong) return { wrong };
 
     await c.query("UPDATE delivery_job SET status = 'delivered', delivered_at = $2 WHERE id = $1", [job.id, now]);
+    if (job.kind === 'p2p') {
+      // No center and no goods money: he earned the fee, paid to him in cash by whoever agreed to.
+      await c.query('UPDATE delivery_partner SET deliveries_done = deliveries_done + 1 WHERE user_id = $1', [partnerId]);
+      await ledger(c, { partnerId, jobId, centerId: null, kind: 'fee_earned', amount: money(job.fee), note: 'Delivery fee (farmer to farmer)' });
+      const who = await partnerName(c, partnerId);
+      await notify(c, job.requester_id, { type: 'delivery', title: 'Delivered', body: `${who} delivered your load. Please rate the delivery.`, refId: job.id });
+      await notify(c, partnerId, { type: 'delivery', title: `You earned Rs ${money(job.fee)}`, body: 'Delivery done. The fee is yours to keep from the cash you were given.', refId: job.id });
+      return {};
+    }
     await c.query("UPDATE orders SET status = 'completed', pickup_otp = NULL WHERE id = $1", [job.order_id]);
     // The first center a farmer actually gets an order from becomes their home center.
     await c.query(
@@ -151,16 +180,30 @@ const STAGES = {
   fallback: 'No delivery partner was free: collect it at the center',
 };
 
+const P2P_STAGES = {
+  open: 'Finding a delivery partner',
+  assigned: 'Your delivery partner is coming to collect it',
+  in_transit: 'On its way to the receiver',
+  delivered: 'Delivered',
+  cancelled: 'Cancelled',
+  fallback: 'No delivery partner was free',
+};
+
 const buyerViewOf = (row) => {
   const active = ['assigned', 'in_transit'].includes(row.status);
+  const p2p = row.kind === 'p2p';
   const view = {
-    jobId: row.id, status: row.status, stage: STAGES[row.status], fee: money(row.fee),
+    jobId: row.id, kind: row.kind, status: row.status, stage: (p2p ? P2P_STAGES : STAGES)[row.status], fee: money(row.fee),
     weightKg: Number(row.weight_kg), distanceKm: Number(row.distance_km),
     payableAmount: money(row.goods_amount) + money(row.fee),
+    ...(p2p ? {
+      description: row.description, feePayer: row.fee_payer, receiverPhone: row.drop_phone, senderPhone: row.pickup_phone,
+      canCancel: ['open', 'assigned'].includes(row.status), tripId: row.trip_id,
+    } : {}),
     pickup: { latitude: row.pickup_latitude, longitude: row.pickup_longitude, label: row.pickup_label },
     drop: { latitude: row.drop_latitude, longitude: row.drop_longitude, label: row.drop_label },
     partner: null, partnerLocation: null, dropCode: null, nextStop: null, distanceToNextStopKm: null, etaMinutes: null,
-    canSwitchToPickup: ['open', 'assigned'].includes(row.status),
+    canSwitchToPickup: !p2p && ['open', 'assigned'].includes(row.status),
     rated: Boolean(row.buyer_rating),
     searchUntil: row.status === 'open' ? row.search_until : null,
   };
@@ -176,7 +219,7 @@ const buyerViewOf = (row) => {
     view.partnerLocation = { latitude: row.partner_latitude, longitude: row.partner_longitude, updatedAt: row.partner_located_at };
     const target = row.status === 'assigned' ? { latitude: row.pickup_latitude, longitude: row.pickup_longitude } : { latitude: row.drop_latitude, longitude: row.drop_longitude };
     const km = roadKm(haversineKm({ latitude: row.partner_latitude, longitude: row.partner_longitude }, target));
-    view.nextStop = row.status === 'assigned' ? 'center' : 'you';
+    view.nextStop = row.status === 'assigned' ? (p2p ? 'pickup' : 'center') : (p2p ? 'receiver' : 'you');
     view.distanceToNextStopKm = km;
     // Heading to the center, the trip to the farm still follows.
     view.etaMinutes = etaMinutes(km + (row.status === 'assigned' ? Number(row.distance_km) : 0), row.vehicle_type);
@@ -193,6 +236,12 @@ const BUYER_FROM = `delivery_job j LEFT JOIN delivery_partner dp ON dp.user_id =
 // The tracking view for one order (the buyer's own, the caller checks whose).
 const buyerDelivery = async (q, orderId) => {
   const { rows: [row] } = await q.query(`SELECT ${BUYER_SELECT} FROM ${BUYER_FROM} WHERE j.order_id = $1`, [orderId]);
+  return row ? buyerViewOf(row) : null;
+};
+
+// The sender's tracking view of a farmer-to-farmer request.
+const requesterView = async (q, jobId) => {
+  const { rows: [row] } = await q.query(`SELECT ${BUYER_SELECT} FROM ${BUYER_FROM} WHERE j.id = $1 AND j.kind = 'p2p'`, [jobId]);
   return row ? buyerViewOf(row) : null;
 };
 
@@ -271,7 +320,7 @@ const wallet = async (q, partnerId, { limit = 50 } = {}) => {
 // The operator's side
 // ---------------------------------------------------------------------------
 
-const OPERATOR_SELECT = `j.id, j.order_id AS "orderId", j.status, j.fee, j.weight_kg AS "weightKg", j.distance_km AS "distanceKm",
+const OPERATOR_SELECT = `j.id, j.kind, j.order_id AS "orderId", j.status, j.fee, j.weight_kg AS "weightKg", j.distance_km AS "distanceKm",
   j.goods_amount AS "goodsAmount", j.drop_village AS "dropVillage", j.created_at AS "createdAt", j.assigned_at AS "assignedAt",
   j.picked_up_at AS "pickedUpAt", j.delivered_at AS "deliveredAt", j.search_until AS "searchUntil", j.operator_told_at AS "needsDriverSince",
   j.partner_id AS "partnerId", COALESCE(NULLIF(pp.name, ''), NULL) AS "partnerName", dp.phone AS "partnerPhone",
@@ -374,7 +423,7 @@ const settleCash = async (db, { centerId, partnerId, amount, note = '', actorId 
 };
 
 module.exports = {
-  handover, deliver, buyerDelivery, buyerDeliveries, buyerViewOf, switchToPickup, rate, wallet,
+  handover, handoverByRequester, requesterView, deliver, buyerDelivery, buyerDeliveries, buyerViewOf, switchToPickup, rate, wallet,
   OPERATOR_SELECT, OPERATOR_FROM, operatorShape, operatorJobView, assignByOperator, assignmentCandidates, owedToCenter, settleCash,
   MAX_WRONG_CODES,
 };

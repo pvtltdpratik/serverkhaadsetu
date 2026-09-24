@@ -35,8 +35,14 @@ module.exports = {
     offerMinutes: Number(process.env.DELIVERY_OFFER_MINUTES) || 4,
     // After this long with nobody, the order goes back to plain pickup.
     searchMinutes: Number(process.env.DELIVERY_SEARCH_MINUTES) || 45,
-    // How many jobs one partner may carry at once.
-    maxActiveJobs: Number(process.env.DELIVERY_MAX_ACTIVE_JOBS) || 1,
+    // How many jobs one partner may carry at once (batching). The loads must also fit his vehicle together.
+    maxActiveJobs: Number(process.env.DELIVERY_MAX_ACTIVE_JOBS) || 3,
+    // Two drops count as "the same trip" when they are this close (straight line, km).
+    batchKm: Number(process.env.DELIVERY_BATCH_KM) || 4,
+    // A trip serves a job whose pickup and drop are each within this of the trip's ends.
+    tripMatchKm: Number(process.env.DELIVERY_TRIP_MATCH_KM) || 8,
+    // Most farmer-to-farmer requests one person may have open at once.
+    maxOpenP2p: Number(process.env.DELIVERY_MAX_OPEN_P2P) || 5,
   },
   corsOrigin: process.env.CORS_ORIGIN || '*',
 };

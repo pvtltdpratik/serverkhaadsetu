@@ -310,6 +310,10 @@ module.exports = (db, roles) => {
       params.push(String(req.query.centerId));
       where.push(`j.center_id = $${params.length}`);
     }
+    if (req.query.kind) {
+      params.push(oneOf(req.query.kind, 'kind', ['center_order', 'p2p']));
+      where.push(`j.kind = $${params.length}`);
+    }
     await sendPaged(req, res, db, {
       select: `${flow.OPERATOR_SELECT}, j.center_id AS "centerId", cn.name AS "centerName"`,
       from: `${flow.OPERATOR_FROM} LEFT JOIN village_center cn ON cn.center_id = j.center_id${where.length ? ` WHERE ${where.join(' AND ')}` : ''}`,
