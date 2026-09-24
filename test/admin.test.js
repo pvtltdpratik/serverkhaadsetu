@@ -125,6 +125,12 @@ test('overview counts what needs attention', async () => {
   assert.equal(o.orders.pending, 0);
   assert.equal(o.restockRequests.pending, 0);
   assert.equal(o.lowStockItems, 0);
+  // Home delivery starts empty: nobody has applied and nothing is on the road.
+  assert.deepEqual(o.delivery, {
+    jobs: { waiting: 0, needDriver: 0, onTheRoad: 0, deliveredToday: 0 },
+    partners: { pending: 0, approved: 0, online: 0 },
+    cashOwed: 0,
+  });
 });
 
 test('suspending a person locks them out at once, tells them, is reversible, and is audited', async () => {

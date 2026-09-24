@@ -48,7 +48,7 @@ const userSummary = async (db, adminEmails) => {
 
 const overview = async (db, adminEmails, now = new Date()) => {
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const [people, centers, orders, restock, lowStock, unattended, discrepancies, surplusStats] = await Promise.all([
+  const [people, centers, orders, restock, lowStock, unattended, discrepancies, surplusStats, deliveryJobs, deliveryPartners, deliveryCash] = await Promise.all([
     userSummary(db, adminEmails),
     db.one(
       `SELECT count(*) FILTER (WHERE status = 'active')::int AS active,
@@ -70,11 +70,26 @@ const overview = async (db, adminEmails, now = new Date()) => {
     // Lots on sale right now, and the units left in them.
     db.one(`SELECT count(*)::int AS "activeLots", COALESCE(sum(l.quantity - l.reserved), 0)::int AS units
               FROM surplus_lot l WHERE ${LOT_LIVE}`),
+    // Home delivery: jobs looking for a driver, on the road, done today.
+    db.one(
+      `SELECT count(*) FILTER (WHERE status = 'open')::int AS waiting,
+              count(*) FILTER (WHERE status = 'open' AND operator_told_at IS NOT NULL)::int AS "needDriver",
+              count(*) FILTER (WHERE status IN ('assigned','in_transit'))::int AS "onTheRoad",
+              count(*) FILTER (WHERE status = 'delivered' AND delivered_at >= $1)::int AS "deliveredToday"
+         FROM delivery_job`, [startOfDay]),
+    db.one(
+      `SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending,
+              count(*) FILTER (WHERE status = 'approved')::int AS approved,
+              count(*) FILTER (WHERE status = 'approved' AND online)::int AS online
+         FROM delivery_partner`),
+    // Cash partners collected for goods and have not yet handed to a center.
+    db.one("SELECT COALESCE(SUM(amount), 0)::float AS owed FROM delivery_ledger WHERE kind IN ('goods_owed','goods_settled')"),
   ]);
   return {
     people, centers, orders, restockRequests: restock,
     lowStockItems: lowStock.n, lowStockUnattended: unattended.n, discrepanciesOpen: discrepancies.n,
     surplus: surplusStats,
+    delivery: { jobs: deliveryJobs, partners: deliveryPartners, cashOwed: deliveryCash.owed },
   };
 };
 

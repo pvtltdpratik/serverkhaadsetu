@@ -596,3 +596,5 @@ Same as the operator's, across every center (`?centerId=` filters), and each act
 - **Money.** The fee is paid in cash to the partner by whoever `feePayer` says: the sender at the pickup or the receiver on arrival (the partner's job view says `collectFeeFrom`). It goes into the wallet as `fee_earned`; nothing is owed to any center. Nobody free in time: the job ends as `fallback` and the sender is told.
 
 Admin: `GET /v1/admin/deliveries?kind=center_order|p2p`.
+
+`GET /v1/admin/overview` also carries `delivery: {jobs: {waiting, needDriver, onTheRoad, deliveredToday}, partners: {pending, approved, online}, cashOwed}` (`needDriver`: still open after the operator was asked to step in; `cashOwed`: goods cash partners hold and have not handed to a center).
