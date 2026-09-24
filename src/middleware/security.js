@@ -23,7 +23,7 @@ const limiter = (windowMs, limit, message) =>
 // village Wi-Fi, a proxy) or in load tests; the default suits normal use.
 const generalLimiter = limiter(60 * 1000, Number(process.env.RATE_LIMIT_PER_MINUTE) || 300, 'Too many requests — please slow down');
 // Pickup OTPs are only 4 digits, so guessing has to be throttled hard.
-const otpLimiter = limiter(15 * 60 * 1000, 10, 'Too many OTP attempts — please wait a few minutes');
+const otpLimiter = limiter(15 * 60 * 1000, Number(process.env.RATE_LIMIT_OTP) || 10, 'Too many OTP attempts — please wait a few minutes');
 const analyzeLimiter = limiter(60 * 1000, 20, 'Too many scans — please wait a moment');
 
 module.exports = { requireApiKey, generalLimiter, otpLimiter, analyzeLimiter };

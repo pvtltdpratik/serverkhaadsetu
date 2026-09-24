@@ -7,6 +7,7 @@ const { notify } = require('../services/notifications');
 const centers = require('../services/centerService');
 const surplus = require('../services/surplus');
 const partners = require('../services/deliveryPartner');
+const flow = require('../services/deliveryFlow');
 const { deductWalkIn, deductWalkInLots, consumeOrderStock } = require('../services/reservations');
 const { checkLowStock } = require('../services/stockAlerts');
 const { notifyBackInStock, notifyNewSurplus } = require('../services/backInStock');
@@ -306,6 +307,63 @@ module.exports = (db, roles) => {
     );
     res.status(201).json((await db.query(
       `SELECT ${RESTOCK_COLUMNS} FROM restock_requests r JOIN products p ON p.id = r.product_id WHERE r.id = $1`, [id])).rows[0]);
+  }));
+
+  // ---- Deliveries from this center ----
+  // Orders going out with a delivery partner. Open ones with needsDriver:true have
+  // nobody yet: the operator can pick someone (see /candidates and /assign).
+  router.get('/deliveries', ah(async (req, res) => {
+    const params = [req.center.centerId];
+    let where = 'j.center_id = $1';
+    if (req.query.status) {
+      params.push(oneOf(req.query.status, 'status', ['open', 'assigned', 'in_transit', 'delivered', 'cancelled', 'fallback']));
+      where += ` AND j.status = $${params.length}`;
+    }
+    await sendPaged(req, res, db, {
+      select: flow.OPERATOR_SELECT,
+      from: `${flow.OPERATOR_FROM} WHERE ${where}`,
+      params,
+      // Active ones first: waiting for a driver, then on the road, then the rest.
+      order: "CASE j.status WHEN 'open' THEN 0 WHEN 'assigned' THEN 1 WHEN 'in_transit' THEN 2 ELSE 3 END, j.created_at DESC, j.id",
+      finish: async (rows) => rows.map(flow.operatorShape),
+    });
+  }));
+
+  router.get('/deliveries/:id', ah(async (req, res) => {
+    const found = await flow.operatorJobView(db, req.params.id);
+    if (!found) throw new HttpError(404, 'Delivery not found');
+    const { rows } = await db.query('SELECT center_id FROM delivery_job WHERE id = $1', [req.params.id]);
+    if (rows[0].center_id !== req.center.centerId) throw new HttpError(404, 'Delivery not found');
+    res.json(found);
+  }));
+
+  // Partners who could take it, nearest first, with who is free right now.
+  router.get('/deliveries/:id/candidates', ah(async (req, res) => {
+    res.json(await flow.assignmentCandidates(db, { jobId: req.params.id, centerId: req.center.centerId, timeZone: config.centerTimezone }));
+  }));
+
+  router.post('/deliveries/:id/assign', ah(async (req, res) => {
+    res.json(await flow.assignByOperator(db, {
+      jobId: req.params.id, centerId: req.center.centerId,
+      partnerId: str(body(req).partnerId, 'partnerId', { max: 200 }),
+    }));
+  }));
+
+  // The delivery partner reads the code from his app; type it to hand the goods over.
+  router.post('/deliveries/:id/handover', otpLimiter, ah(async (req, res) => {
+    const otp = str(body(req).otp, 'otp', { min: 4, max: 4 });
+    res.json(await flow.handover(db, { jobId: req.params.id, centerId: req.center.centerId, otp }));
+  }));
+
+  // Cash for goods that delivery partners collected and still have to hand over.
+  router.get('/delivery-cash', ah(async (req, res) => res.json(await flow.owedToCenter(db, req.center.centerId))));
+  router.post('/delivery-cash/:partnerId/settle', ah(async (req, res) => {
+    const input = body(req);
+    res.json(await flow.settleCash(db, {
+      centerId: req.center.centerId, partnerId: req.params.partnerId, actorId: deviceId(req),
+      amount: num(input.amount, 'amount', { min: 1, max: 10000000 }),
+      note: str(input.note, 'note', { max: 200, optional: true }) || '',
+    }));
   }));
 
   // ---- Delivery partners ----

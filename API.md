@@ -545,3 +545,35 @@ Products now carry `weightKg` (from the unit label, e.g. "40 kg bag" -> 40) so a
 
 ### Admin - `/v1/admin/delivery-partners`
 Same as the operator's, across every center (`?centerId=` filters), and each action is written to the audit log as `delivery_partner.<action>`.
+
+### Home delivery (ordering, the job, the two codes)
+
+**Ordering.** `POST /v1/orders` also takes `fulfilment: "pickup"` (default) or `"delivery"`, and for delivery `deliveryAddress: {latitude, longitude, phone, label?, note?, village?}`. The fee is worked out on the **server** (never sent by the client): `25 + 4 x road km + 2 per 10 kg above the first 10`, rounded up to the next Rs 5, minimum Rs 30 (`DELIVERY_BASE_FEE`, `DELIVERY_PER_KM`, `DELIVERY_PER_10KG`, `DELIVERY_MIN_FEE`). Road km is the straight line x 1.3, and the farm must be within `DELIVERY_MAX_KM` (20) of the center: `400 {code:"delivery_too_far"}` otherwise, with nothing held. Without a `centerId`, only centers within reach are considered. The order carries `fulfilment`, `deliveryFee`, `payableAmount` (goods + fee), `pickupOtp: null` (no counter code) and `delivery` (below). Products' `weightKg` sets the load.
+
+**Cash.** There is no payment system: the buyer pays goods + fee **in cash to the delivery partner** on arrival. The partner keeps the fee and owes the goods amount to the center (see the wallet).
+
+`POST /v1/delivery/quote` `{items:[{productId|surplusLotId, quantity}], latitude, longitude, centerId?}` (device) -> `{centerId, centerName, available, fee, weightKg, roadKm, maxRoadKm, suggestedVehicle: bike|pickup|tractor, partnersFree, note, payment}`. `partnersFree: 0` is not a refusal: the request stays open and then falls back to pickup.
+
+**The job** (`delivery` on an order, also `GET /v1/orders/:id/delivery`): `{jobId, status: open|assigned|in_transit|delivered|cancelled|fallback, stage, fee, weightKg, distanceKm, payableAmount, pickup, drop, partner:{name, vehicleLabel, vehicleNumber, ratingAvg, ratingCount, deliveriesDone, phone} (once someone is assigned), dropCode (the buyer's code, once someone is coming), partnerLocation:{latitude, longitude, updatedAt}, nextStop: center|you, distanceToNextStopKm, etaMinutes, canSwitchToPickup, rated}`.
+
+**Finding a partner.** The job is offered to the **nearest** approved partners who are free now (switch on, one of their days and hours), can carry the weight, are within their own range, and are not on another job, three at a time, each offer open for 4 minutes (`DELIVERY_OFFERS_PER_ROUND`, `DELIVERY_OFFER_MINUTES`). A decline or timeout brings in the next ones. If nobody is free the operator is asked once to step in. After 45 minutes (`DELIVERY_SEARCH_MINUTES`) with nobody, the order **falls back to plain pickup**: fee 0, a pickup code, the buyer and operator told. A delivery order is never moved to another center.
+
+**Partner (`/v1/delivery`)**
+- `PUT /partner/location {latitude, longitude}` (204) - share where I am (used for nearest-first matching and for the buyer's tracking).
+- `GET /jobs/offers` - open offers (fee, load, road km, items, pickup center, only the buyer's village). `GET /jobs/active` - the job I am doing. `GET /jobs/:id`.
+- `POST /jobs/:id/accept` - first wins, the job row is locked; `409` "Another partner already took this job". After accepting: the buyer's exact spot, phone, note, `handoverCode` (read out to the operator), `cashToCollect`.
+- `POST /jobs/:id/decline` (204) - turn an offer down, or hand back an accepted job before collecting it (counts against my record, and it goes to others).
+- `POST /jobs/:id/deliver {otp}` - the buyer's 4-digit code; ends the delivery, completes the order, pays the fee into the wallet.
+- `POST /jobs/:id/rate-buyer {stars 1-5, comment?}` (204, once, after delivery).
+- `GET /wallet` -> `{earned, owed, owedByCenter:[{centerId, centerName, owed}], entries:[{kind: fee_earned|goods_owed|goods_settled, amount, note, ...}], deliveriesDone, ratingAvg, ratingCount, cancellations}`.
+
+**Buyer (device)**: `POST /orders/:id/delivery/cancel` collect it myself instead (until it is on the road; new pickup code, fee removed), `POST /orders/:id/delivery/rate {stars, comment?}` (204, once).
+
+**Operator (`/v1/operator`)**
+- `GET /deliveries?status=` (waiting for a driver first; `needsDriver`, `offersPending`, `cashToCollect`), `GET /deliveries/:id`, `GET /deliveries/:id/candidates` (partners who could take it, free ones first then nearest), `POST /deliveries/:id/assign {partnerId}` (also swaps a partner who has not collected yet; range and hours are the operator's call, load/approval/one-job-at-a-time still apply).
+- `POST /deliveries/:id/handover {otp}` - the partner reads the code from his app; the goods leave the shelf and the buyer is told. The counter `verify-otp` refuses delivery orders.
+- `GET /delivery-cash`, `POST /delivery-cash/:partnerId/settle {amount, note?}` - cash a partner collected for goods and has handed over.
+
+**Codes.** `pickup` code: the partner shows it, the operator types it. `drop` code: the buyer shows it, the partner types it. Neither is ever returned to the operator. Five wrong tries in a row lock that step for 15 minutes (`429`); every wrong try says how many are left (`attemptsLeft`). Cancelling an order ends its delivery unless the goods are already on the road (`409`).
+
+**Admin**: `GET /v1/admin/deliveries?status=&centerId=` (same rows plus `centerName`). Rate limits are `RATE_LIMIT_PER_MINUTE` (300) and `RATE_LIMIT_OTP` (10 per 15 min).

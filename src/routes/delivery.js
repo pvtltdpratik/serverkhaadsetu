@@ -3,6 +3,8 @@ const multer = require('multer');
 const { asyncHandler, str, num, body, deviceId } = require('../utils/http');
 const partners = require('../services/deliveryPartner');
 const jobs = require('../services/deliveryJobs');
+const flow = require('../services/deliveryFlow');
+const { otpLimiter } = require('../middleware/security');
 const { resolveOrigin } = require('../services/location');
 const { HttpError } = require('../utils/http');
 const { haversineKm } = require('../services/geo');
@@ -143,6 +145,27 @@ module.exports = (db) => {
     await jobs.decline(db, deviceId(req), req.params.id, { timeZone: config.centerTimezone });
     res.status(204).end();
   }));
+
+  // The buyer reads out their delivery code when it arrives: that is the proof, and it
+  // is what pays me. Wrong codes are counted (five in a row locks it for 15 minutes).
+  router.post('/jobs/:id/deliver', otpLimiter, ah(async (req, res) => {
+    const otp = str(body(req).otp, 'otp', { min: 4, max: 4 });
+    res.json(await flow.deliver(db, { jobId: req.params.id, partnerId: deviceId(req), otp }));
+  }));
+
+  // Rate the farmer I delivered to (once, after it is done).
+  router.post('/jobs/:id/rate-buyer', ah(async (req, res) => {
+    const input = body(req);
+    await flow.rate(db, {
+      jobId: req.params.id, raterId: deviceId(req), role: 'partner_to_buyer',
+      stars: num(input.stars, 'stars', { min: 1, max: 5, integer: true }),
+      comment: str(input.comment, 'comment', { max: 300, optional: true }) || '',
+    });
+    res.status(204).end();
+  }));
+
+  // What I have earned, what I owe which center, and the latest entries.
+  router.get('/wallet', ah(async (req, res) => res.json(await flow.wallet(db, deviceId(req)))));
 
   return router;
 };

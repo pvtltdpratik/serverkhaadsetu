@@ -14,6 +14,7 @@ let server;
 let base;
 let db;
 let runMaintenance;
+let runMaintenanceRaw;
 const centers = {};
 
 const call = async (method, path, { body, device = 'farmer-1' } = {}) => {
@@ -51,7 +52,17 @@ const titles = async (device) => (await call('GET', '/v1/farmer/notifications', 
 test.before(async () => {
   const { openTestDb } = require('./helpers');
   const { createApp } = require('../src/app');
-  ({ runReservationMaintenance: runMaintenance } = require('../src/services/reservationJobs'));
+  ({ runReservationMaintenance: runMaintenanceRaw } = require('../src/services/reservationJobs'));
+  // The job's lock is database-wide and test files run in parallel, so another file's run
+  // can make ours skip. Most tests just want the job to have run: retry until it does.
+  runMaintenance = async (d, now) => {
+    for (let i = 0; i < 100; i += 1) {
+      const r = await runMaintenanceRaw(d, now);
+      if (!r.skipped) return r;
+      await new Promise((res) => setTimeout(res, 40));
+    }
+    throw new Error('the reservation job never got its lock');
+  };
   db = await openTestDb('t_reservations');
   const app = createApp(db);
   await new Promise((r) => { server = app.listen(0, r); });
@@ -355,7 +366,14 @@ test('the job is safe to run from several instances at once', async () => {
   const future = new Date(Date.now() + 6 * DAY);
   const held = (await db.query("SELECT count(*)::int AS n FROM orders WHERE stock_reserved AND status IN ('pending','readyForPickup')")).rows[0].n;
   assert.ok(held >= 1);
-  const results = await Promise.all([runMaintenance(db, future), runMaintenance(db, future), runMaintenance(db, future)]);
+  // The lock is database-wide and test files run in parallel, so another file's run can
+  // make all three of ours skip; try again until one really ran.
+  let results;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    results = await Promise.all([runMaintenanceRaw(db, future), runMaintenanceRaw(db, future), runMaintenanceRaw(db, future)]);
+    if (results.some((r) => !r.skipped)) break;
+    await new Promise((r) => setTimeout(r, 40));
+  }
   assert.equal(results.reduce((n, r) => n + r.expired, 0), held, 'each order is expired exactly once across all runs');
   assert.ok(results.some((r) => r.skipped) || results.filter((r) => r.expired).length === 1, 'runs do not overlap');
   assert.deepEqual(await shelf(c, 'p-neemcake'), { on_hand: 3, reserved: 0 });

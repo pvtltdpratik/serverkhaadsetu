@@ -17,6 +17,7 @@ let base;
 let db;
 let counter = 0;
 let runReassignment;
+let runReassignmentRaw;
 
 const call = async (method, path, { body, device = 'farmer-1' } = {}) => {
   const res = await fetch(base + path, {
@@ -60,7 +61,17 @@ const eventually = async (check, tries = 40) => {
 test.before(async () => {
   const { openTestDb } = require('./helpers');
   const { createApp } = require('../src/app');
-  ({ runReassignment } = require('../src/services/reassignment'));
+  ({ runReassignment: runReassignmentRaw } = require('../src/services/reassignment'));
+  // The job's lock is database-wide and test files run in parallel, so another file's run
+  // can make ours skip. Most tests just want it to have run: retry until it does.
+  runReassignment = async (d, opts) => {
+    for (let i = 0; i < 100; i += 1) {
+      const r = await runReassignmentRaw(d, opts);
+      if (!r.skipped) return r;
+      await new Promise((res) => setTimeout(res, 40));
+    }
+    throw new Error('the reassignment job never got its lock');
+  };
   db = await openTestDb('t_automation');
   const app = createApp(db);
   await new Promise((r) => { server = app.listen(0, r); });
@@ -225,7 +236,12 @@ test('two passes at once move an order exactly once', async () => {
   const placed = await Promise.all(Array.from({ length: 4 }, (_, i) => order(a, `race-${i}`, 8)));
   await call('PATCH', '/v1/operator/center', { device: a.device, body: { isOpen: false } });
   const now = later(60);
-  const runs = await Promise.all([runReassignment(db, { now }), runReassignment(db, { now }), runReassignment(db, { now })]);
+  let runs;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    runs = await Promise.all([runReassignmentRaw(db, { now }), runReassignmentRaw(db, { now }), runReassignmentRaw(db, { now })]);
+    if (runs.some((r) => !r.skipped)) break;
+    await new Promise((r) => setTimeout(r, 40));
+  }
   assert.equal(runs.reduce((n, r) => n + r.moved, 0), 4);
   assert.deepEqual(await shelf(a), { on_hand: 20, reserved: 0 });
   assert.deepEqual(await shelf(b), { on_hand: 20, reserved: 8 });

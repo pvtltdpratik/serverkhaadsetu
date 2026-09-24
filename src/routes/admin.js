@@ -7,6 +7,7 @@ const { withItems, serializeOrder } = require('../services/orders');
 const { notify } = require('../services/notifications');
 const surplus = require('../services/surplus');
 const partners = require('../services/deliveryPartner');
+const flow = require('../services/deliveryFlow');
 
 const CENTER_STATUSES = ['active', 'suspended'];
 const ACCOUNT_STATUSES = ['active', 'suspended'];
@@ -295,6 +296,27 @@ module.exports = (db, roles) => {
       await recordAudit(c, req, { action: 'discrepancy.resolve', targetType: 'discrepancy', targetId: req.params.id, details: { centerId: rows[0].center_id, productId: rows[0].product_id, note } });
     });
     res.json({ id: req.params.id, status: 'resolved' });
+  }));
+
+  // ---- Deliveries ----
+  router.get('/deliveries', ah(async (req, res) => {
+    const params = [];
+    const where = [];
+    if (req.query.status) {
+      params.push(oneOf(req.query.status, 'status', ['open', 'assigned', 'in_transit', 'delivered', 'cancelled', 'fallback']));
+      where.push(`j.status = $${params.length}`);
+    }
+    if (req.query.centerId) {
+      params.push(String(req.query.centerId));
+      where.push(`j.center_id = $${params.length}`);
+    }
+    await sendPaged(req, res, db, {
+      select: `${flow.OPERATOR_SELECT}, j.center_id AS "centerId", cn.name AS "centerName"`,
+      from: `${flow.OPERATOR_FROM} LEFT JOIN village_center cn ON cn.center_id = j.center_id${where.length ? ` WHERE ${where.join(' AND ')}` : ''}`,
+      params,
+      order: "CASE j.status WHEN 'open' THEN 0 WHEN 'assigned' THEN 1 WHEN 'in_transit' THEN 2 ELSE 3 END, j.created_at DESC, j.id",
+      finish: async (rows) => rows.map(flow.operatorShape),
+    });
   }));
 
   // ---- Delivery partners ----

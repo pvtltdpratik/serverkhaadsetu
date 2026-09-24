@@ -4,6 +4,7 @@ const { HttpError, asyncHandler, str, num, oneOf, body, deviceId, sendPaged, lik
 const { ORDER_COLUMNS, serializeOrder, findOrder, cancelOrder, withItems } = require('../services/orders');
 const { placeAppOrder } = require('../services/orderPlacement');
 const { normalizePhone } = require('../services/deliveryPartner');
+const flow = require('../services/deliveryFlow');
 const { resolveOrigin } = require('../services/location');
 const config = require('../config');
 const { notify } = require('../services/notifications');
@@ -124,7 +125,11 @@ module.exports = (db) => {
     const byId = new Map(rows.map((c) => [c.centerId, c]));
     return orders.map((o) => ({ ...o, center: byId.get(o.centerId) || null }));
   };
-  const farmerView = async (orders) => (await withCenter(orders)).map((o) => ({ ...serializeOrder(o, { includeOtp: true }), center: o.center }));
+  // Each order also carries its delivery (partner, code, where they are), if it has one.
+  const farmerView = async (orders) => {
+    const deliveries = await flow.buyerDeliveries(db, orders.map((o) => o.id));
+    return (await withCenter(orders)).map((o) => ({ ...serializeOrder(o, { includeOtp: true }), center: o.center, delivery: deliveries.get(o.id) || null }));
+  };
 
   router.post('/orders', ah(async (req, res) => {
     const owner = deviceId(req);
@@ -176,7 +181,7 @@ module.exports = (db) => {
       timeZone: config.centerTimezone,
       delivery,
     });
-    res.status(201).json({ ...serializeOrder(order, { includeOtp: true }), center });
+    res.status(201).json({ ...serializeOrder(order, { includeOtp: true }), center, delivery: await flow.buyerDelivery(db, order.id) });
   }));
 
   router.get('/orders', ah(async (req, res) => {
@@ -190,6 +195,35 @@ module.exports = (db) => {
   }));
 
   router.get('/orders/:id', ah(async (req, res) => res.json((await farmerView([await ownOrder(req)]))[0])));
+
+  // ---- Following my delivery ----
+  router.get('/orders/:id/delivery', ah(async (req, res) => {
+    await ownOrder(req);
+    const delivery = await flow.buyerDelivery(db, req.params.id);
+    if (!delivery) throw new HttpError(404, 'This order has no delivery');
+    res.json(delivery);
+  }));
+
+  // Collect it myself after all (until it is on the road).
+  router.post('/orders/:id/delivery/cancel', ah(async (req, res) => {
+    await ownOrder(req);
+    await flow.switchToPickup(db, { orderId: req.params.id, buyerId: deviceId(req) });
+    res.json((await farmerView([await ownOrder(req)]))[0]);
+  }));
+
+  // Rate the delivery partner (once, after it is delivered).
+  router.post('/orders/:id/delivery/rate', ah(async (req, res) => {
+    await ownOrder(req);
+    const job = await flow.buyerDelivery(db, req.params.id);
+    if (!job) throw new HttpError(404, 'This order has no delivery');
+    const input = body(req);
+    await flow.rate(db, {
+      jobId: job.jobId, raterId: deviceId(req), role: 'buyer_to_partner',
+      stars: num(input.stars, 'stars', { min: 1, max: 5, integer: true }),
+      comment: str(input.comment, 'comment', { max: 300, optional: true }) || '',
+    });
+    res.status(204).end();
+  }));
 
   router.post('/orders/:id/cancel', ah(async (req, res) => {
     await ownOrder(req); // 404 unless it is this owner's
