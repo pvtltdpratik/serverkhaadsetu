@@ -18,6 +18,7 @@ const schemesRouter = require('./routes/schemes');
 const operatorRouter = require('./routes/operator');
 const adminRouter = require('./routes/admin');
 const meRouter = require('./routes/me');
+const farmerProfileRouter = require('./routes/farmerProfile');
 const centersRouter = require('./routes/centers');
 const deliveryRouter = require('./routes/delivery');
 const { createRoles } = require('./middleware/roles');
@@ -50,6 +51,7 @@ const createApp = (db, options = {}) => {
   v1.use(soilRouter(db)); // POST /analyze, GET /history, GET /scan/:id
   v1.use('/weather', weatherRouter(db));
   v1.use('/farmer', farmerRouter(db));
+  v1.use('/farmer', farmerProfileRouter(db)); // contact, addresses, scheme details
   v1.use(marketplaceRouter(db)); // /products..., /orders...
   v1.use('/community', communityRouter(db));
   v1.use('/schemes', schemesRouter(db));

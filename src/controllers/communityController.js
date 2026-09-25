@@ -34,6 +34,20 @@ module.exports = (db) => ({
     res.status(201).json(post);
   },
 
+  // The signed-in farmer's own posts and replies, newest first, each reply with the title
+  // of the post it is under so the profile can link back to it.
+  mine: async (req, res) => {
+    const owner = deviceId(req);
+    const posts = (await db.query(
+      `SELECT ${community.POST_COLUMNS} FROM ${community.POST_FROM} WHERE p.farmer_id = $1 ORDER BY p.created_at DESC, p.post_id LIMIT 100`, [owner],
+    )).rows;
+    const comments = (await db.query(
+      `SELECT ${community.COMMENT_COLUMNS}, p.title AS "postTitle" FROM ${community.COMMENT_FROM}
+         JOIN community_post p ON p.post_id = c.post_id WHERE c.farmer_id = $1 ORDER BY c.created_at DESC, c.comment_id LIMIT 100`, [owner],
+    )).rows;
+    res.json({ posts, comments });
+  },
+
   getPost: async (req, res) => {
     const post = await community.findPost(db, req.params.id);
     const comments = await community.commentsForPost(db, req.params.id);

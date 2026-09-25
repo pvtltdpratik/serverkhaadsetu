@@ -9,6 +9,7 @@ module.exports = (db) => {
 
   router.post('/posts', ah(c.createPost));
   router.get('/posts', ah(c.listPosts));
+  router.get('/mine', ah(c.mine));
   router.get('/posts/:id', ah(c.getPost));
   router.post('/posts/:id/comments', ah(c.addComment));
   router.post('/posts/:id/like', ah(c.toggleLike));

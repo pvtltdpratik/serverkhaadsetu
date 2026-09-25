@@ -140,6 +140,8 @@ module.exports = {
   PROBLEM_TYPES,
   POST_COLUMNS,
   POST_FROM,
+  COMMENT_COLUMNS,
+  COMMENT_FROM,
   newPostId,
   findPost,
   hasLiked,
