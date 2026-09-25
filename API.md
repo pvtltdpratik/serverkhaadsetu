@@ -598,3 +598,38 @@ Same as the operator's, across every center (`?centerId=` filters), and each act
 Admin: `GET /v1/admin/deliveries?kind=center_order|p2p`.
 
 `GET /v1/admin/overview` also carries `delivery: {jobs: {waiting, needDriver, onTheRoad, deliveredToday}, partners: {pending, approved, online}, cashOwed}` (`needDriver`: still open after the operator was asked to step in; `cashOwed`: goods cash partners hold and have not handed to a center).
+
+## 11. Farmer profile, schemes, payments, assistant, resale and reviews
+
+All of these need the signed-in farmer's token unless marked otherwise.
+
+### Profile (`/v1/farmer`)
+- `GET/PUT /contact` contact email and phone. `GET/POST /addresses`, `PATCH/DELETE /addresses/:id`, `POST /addresses/:id/default` (latitude/longitude come from the phone's GPS).
+- `GET/PUT /details` the answers used for scheme eligibility and reviews (category, land, bank, KCC, irrigation, `soilType`, `practisesOrganic`, `inFarmerGroup`, ...). Validated against `src/data/farmerDetails.js`; entered once, reused everywhere.
+- `GET /v1/community/mine` my posts and replies.
+
+### Schemes (`/v1/schemes`)
+- `GET /?sector=&level=&audience=&q=` the catalog (about 50 schemes). `GET /eligibility` every scheme with `eligible | possible | notEligible | open` against my details. `GET /:id`, `GET /:id/eligibility` (per-rule checks), `POST /:id/apply` (`409` when `notEligible`), `GET /applications`, `GET /:id/application`.
+
+### Payments (`/v1/payments`, Razorpay)
+- `GET /config` the public key id. `POST /orders {orderId}` creates the Razorpay order on the server. `POST /verify {orderId, razorpay_payment_id, razorpay_order_id, razorpay_signature}` checks the HMAC-SHA256 signature. `POST /wallet {orderId}` pays from the wallet (all or nothing). `GET /orders/:orderId` payment state.
+- `POST /webhooks/razorpay` (no auth, raw body, `x-razorpay-signature`).
+- Only the goods amount is paid online; the delivery fee stays cash. A cancelled or expired paid order queues a refund.
+
+### Assistant (`/v1/assistant`)
+- `GET /status`. `POST /chat {message, history?}` Marathi, Hindi or English; answered by Gemini on the server with the farmer's profile, details and latest scan as context. Limited to `ASSISTANT_PER_HOUR` (40) per person.
+
+### Wallet and resale (`/v1/wallet`, `/v1/resale`)
+- `GET /v1/wallet` balance and ledger.
+- Farmer: `GET /resale/eligible`, `POST /resale/suggest` (price guide), `POST /resale` (draft), `POST /resale/:id/photos/:kind`, `POST /resale/:id/submit`, `POST /resale/:id/withdraw`, `GET /resale/mine`, `GET /resale/:id`, `POST /resale/disputes`. Three listings a season; 48 hours to hand over; 48 hours to dispute.
+- Operator: `/v1/operator/resale/...` queue, pre-approve, request inspection, inspect, reject, walk-in intake, cash payouts. Admin: `/v1/admin/resale/...` disputes, UPI payouts.
+- Commission: 8% + 3% (89% to the seller) when verified, 10% + 4% (86%) unverified; a cash sale keeps 97%.
+
+### Fertilizer reviews (`/v1/reviews`)
+- `GET /reference/crops`, `GET /eligible`, `GET /prefill/:productId`, `POST /` (baseline, returns a 5% coupon), `POST /:id/mid` (from day 28), `POST /:id/post` (harvest, from day 45), `POST /:id/photos/:kind`, `GET /mine`.
+- `GET /product/:productId?soil=&crop=&season=&size=&improved=` summary and cards; `GET /product/:productId/prediction?crop=&acres=` predicted yield range.
+- `GET /rewards`, `POST /rewards/redeem {coins}` (100 coins = 25 rupees in the wallet). A yield above +80%, below -50% or over 3 times the district average is held for an agronomist (`GET /flagged`, `POST /:id/decide`, `POST /:id/feature`, `GET /training-data`, admin only).
+- `POST /v1/orders` accepts `couponCode`; the percentage comes off regular products only.
+
+### Environment
+`RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `GEMINI_API_KEY`, optional `GEMINI_MODEL` (default `gemini-flash-latest`), `GEMINI_FALLBACK_MODEL`, `ASSISTANT_PER_HOUR`. On the server, put these in the `.env` next to the app and register `https://<host>/webhooks/razorpay` in the Razorpay dashboard. Migrations 013 to 017 run on start.
