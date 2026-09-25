@@ -2,6 +2,7 @@ const config = require('./config');
 const { ensureDatabaseExists } = require('./db/bootstrap');
 const { createDb } = require('./db/database');
 const { seedIfEmpty } = require('./db/seed');
+const { syncSchemeCatalog } = require('./services/schemeCatalogSync');
 const { createApp } = require('./app');
 const { runReservationMaintenance } = require('./services/reservationJobs');
 const { runReassignment } = require('./services/reassignment');
@@ -20,6 +21,7 @@ const main = async () => {
   const db = createDb({ url: config.databaseUrl, ssl: config.databaseSsl });
   await db.migrate();
   await seedIfEmpty(db);
+  await syncSchemeCatalog(db);
 
   const app = createApp(db);
   const server = app.listen(config.port, () => console.log(`API server listening on port ${config.port}`));
