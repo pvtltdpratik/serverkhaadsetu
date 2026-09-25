@@ -26,4 +26,15 @@ const generalLimiter = limiter(60 * 1000, Number(process.env.RATE_LIMIT_PER_MINU
 const otpLimiter = limiter(15 * 60 * 1000, Number(process.env.RATE_LIMIT_OTP) || 10, 'Too many OTP attempts — please wait a few minutes');
 const analyzeLimiter = limiter(60 * 1000, 20, 'Too many scans — please wait a moment');
 
-module.exports = { requireApiKey, generalLimiter, otpLimiter, analyzeLimiter };
+// Each question costs money, so one farmer gets a limited number an hour (by account, not address).
+const assistantLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: Number(process.env.ASSISTANT_PER_HOUR) || 40,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  keyGenerator: (req) => `assistant:${req.userId || req.get('x-device-id') || 'anonymous'}`,
+  validate: { keyGeneratorIpFallback: false },
+  handler: (req, res, next) => next(new HttpError(429, 'You have asked a lot of questions. Please try again in a while.')),
+});
+
+module.exports = { requireApiKey, generalLimiter, otpLimiter, analyzeLimiter, assistantLimiter };

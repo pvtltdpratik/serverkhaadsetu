@@ -51,5 +51,13 @@ module.exports = {
     keySecret: process.env.RAZORPAY_KEY_SECRET || '',
     webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || '',
   },
+  // The farming assistant (Google Gemini). The key is read only here, from the environment, and is never
+  // sent to the app or written to git. Leave it empty to switch the assistant off.
+  gemini: {
+    apiKey: process.env.GEMINI_API_KEY || '',
+    model: process.env.GEMINI_MODEL || 'gemini-flash-latest',
+    // Tried when the main model is busy.
+    fallbackModel: process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.8-flash',
+  },
   corsOrigin: process.env.CORS_ORIGIN || '*',
 };

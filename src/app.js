@@ -4,7 +4,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 
 const config = require('./config');
-const { requireApiKey, generalLimiter } = require('./middleware/security');
+const { requireApiKey, generalLimiter, assistantLimiter } = require('./middleware/security');
 const { notFound, errorHandler } = require('./middleware/errors');
 const { createAuth } = require('./middleware/auth');
 
@@ -19,6 +19,8 @@ const operatorRouter = require('./routes/operator');
 const adminRouter = require('./routes/admin');
 const meRouter = require('./routes/me');
 const paymentsRouter = require('./routes/payments');
+const assistantRouter = require('./routes/assistant');
+const { createAssistant } = require('./services/assistant');
 const { createRazorpay } = require('./services/razorpay');
 const farmerProfileRouter = require('./routes/farmerProfile');
 const centersRouter = require('./routes/centers');
@@ -35,6 +37,7 @@ const createApp = (db, options = {}) => {
     superAdminEmails: options.superAdminEmails || config.superAdminEmails,
   });
   const razorpay = options.razorpay || createRazorpay(config.razorpay);
+  const assistant = options.assistant || createAssistant(config.gemini);
   const app = express();
 
   // Behind Nginx on EC2: trust one proxy hop so rate limiting sees real client IPs.
@@ -65,6 +68,8 @@ const createApp = (db, options = {}) => {
   v1.use('/centers', centersRouter(db));
   v1.use('/delivery', deliveryRouter(db));
   v1.use('/payments', paymentsRouter(db, razorpay));
+  v1.use('/assistant/chat', assistantLimiter);
+  v1.use('/assistant', assistantRouter(db, assistant));
   v1.use('/operator', operatorRouter(db, roles));
   v1.use('/admin', adminRouter(db, roles));
   app.use('/v1', v1);
