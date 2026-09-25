@@ -37,6 +37,7 @@ module.exports = (db, roles) => {
   const ah = asyncHandler;
   router.use(roles.requireAdmin);
   router.use('/resale', adminResale(db)); // complaints about surplus goods, UPI payouts to sellers
+  router.use('/reviews', require('./reviews').admin(db)); // held harvest logs, featured stories, training data
 
   // ---- Overview ----
   router.get('/overview', ah(async (req, res) => res.json(await admin.overview(db, roles.adminEmails))));

@@ -35,6 +35,7 @@ const runReservationMaintenance = async (db, now = new Date()) => {
       await releaseOrderStock(c, order);
       await c.query("UPDATE orders SET status = 'cancelled', pickup_otp = NULL WHERE id = $1", [id]);
       await require('./payments').markRefundPending(c, id);
+      await require('./fertilizerReviews').releaseCoupon(c, id);
       await notify(c, order.ownerId, {
         type: 'order',
         title: 'Your reservation expired',

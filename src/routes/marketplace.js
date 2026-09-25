@@ -180,6 +180,7 @@ module.exports = (db) => {
       homeCenterId: located ? located.profile.homeCenterId : null,
       timeZone: config.centerTimezone,
       delivery,
+      couponCode: str(input.couponCode, 'couponCode', { max: 40, optional: true }) || null,
     });
     res.status(201).json({ ...serializeOrder(order, { includeOtp: true }), center, delivery: await flow.buyerDelivery(db, order.id) });
   }));

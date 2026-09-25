@@ -730,7 +730,7 @@ module.exports = {
   PRICE_MIN, PRICE_MAX, MAX_LISTINGS_PER_SEASON, HANDOVER_HOURS, DISPUTE_HOURS, NEIGHBOUR_AFTER_DAYS, OWN_AREA_KM, CASH_KEEP,
   CONDITIONS, PAYOUT_MODES, SEALS, VISUALS,
   seasonOf, ageFactor, conditionBand, priceGuide, commission, minimumUnits, visibleFrom, round1,
-  getListing, eligibleProducts, suggest, createDraft, savePhoto, readPhoto, submit, listMine, detailMine, withdrawMine,
+  detectPhoto, getListing, eligibleProducts, suggest, createDraft, savePhoto, readPhoto, submit, listMine, detailMine, withdrawMine,
   queue, preapprove, requestInspection, rejectListing, inspect, walkIn, findSellers,
   onLotsReserved, assertHandable, recordSales, cashDue, markCashPaid, upiPending, markUpiPaid, raiseDispute, disputes, resolveDispute, runMaintenance,
 };

@@ -16,6 +16,7 @@ const FIELDS = {
   hasKcc: { type: YES_NO },
   hasCropLoan: { type: YES_NO },
   irrigation: { type: 'enum', values: ['rainfed', 'well', 'borewell', 'canal', 'drip', 'sprinkler'] },
+  soilType: { type: 'enum', values: ['black', 'red', 'alluvial', 'laterite', 'sandy', 'other'] },
   primaryCrops: { type: 'list' },
   ownsPumpset: { type: YES_NO },
   ownsTractor: { type: YES_NO },

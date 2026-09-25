@@ -4,7 +4,8 @@ const { releaseOrderStock } = require('./reservations');
 
 const ORDER_COLUMNS = `id, customer_name AS "customerName", type, status, created_at AS "createdAt", pickup_otp AS "pickupOtp",
   owner_id AS "ownerId", center_id AS "centerId", stock_reserved AS "stockReserved", reserved_until AS "reservedUntil",
-  fulfilment, delivery_fee AS "deliveryFee", payment_status AS "paymentStatus", paid_at AS "paidAt"`;
+  fulfilment, delivery_fee AS "deliveryFee", payment_status AS "paymentStatus", paid_at AS "paidAt",
+  discount_percent AS "discountPercent", coupon_code AS "couponCode"`;
 
 const newOrderId = () => `order-${crypto.randomUUID()}`;
 const newOtp = () => String(crypto.randomInt(0, 10000)).padStart(4, '0');
@@ -36,6 +37,7 @@ const serializeOrder = (order, { includeOtp }) => {
     deliveryFee: Number(order.deliveryFee || 0),
     totalAmount: totalOf(order),
     paymentStatus: order.paymentStatus || 'unpaid',
+    discountPercent: Number(order.discountPercent || 0),
     // What the buyer still pays in cash: the goods unless they were paid online, plus the delivery fee.
     payableAmount: (order.paymentStatus === 'paid' ? 0 : totalOf(order)) + Number(order.deliveryFee || 0),
     itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0),
@@ -61,6 +63,7 @@ const cancelOrder = async (db, id, onCancelled) =>
     await require('./deliveryJobs').cancelJobForOrder(c, id, 'The order was cancelled');
     await c.query("UPDATE orders SET status = 'cancelled', pickup_otp = NULL WHERE id = $1", [id]);
     await require('./payments').markRefundPending(c, id); // money paid online is queued to go back
+    await require('./fertilizerReviews').releaseCoupon(c, id); // a coupon is given back with the order
     await releaseOrderStock(c, order); // the held stock goes back on the shelf
     if (onCancelled) await onCancelled(c, order);
     return { ...order, status: 'cancelled', pickupOtp: null };
@@ -69,10 +72,10 @@ const cancelOrder = async (db, id, onCancelled) =>
 const insertOrder = async (c, order) => {
   await c.query(
     `INSERT INTO orders (id, customer_name, type, status, created_at, pickup_otp, owner_id, center_id,
-                         stock_reserved, reserved_until, origin_latitude, origin_longitude)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+                         stock_reserved, reserved_until, origin_latitude, origin_longitude, discount_percent, coupon_code)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
     [order.id, order.customerName, order.type, order.status, order.createdAt, order.pickupOtp, order.ownerId, order.centerId || null,
-      Boolean(order.stockReserved), order.reservedUntil || null, order.originLatitude ?? null, order.originLongitude ?? null],
+      Boolean(order.stockReserved), order.reservedUntil || null, order.originLatitude ?? null, order.originLongitude ?? null, order.discountPercent || 0, order.couponCode || null],
   );
   for (const [i, item] of order.items.entries()) {
     await c.query(

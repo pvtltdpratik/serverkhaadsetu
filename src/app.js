@@ -21,6 +21,7 @@ const meRouter = require('./routes/me');
 const paymentsRouter = require('./routes/payments');
 const assistantRouter = require('./routes/assistant');
 const { resaleRouter, walletRouter } = require('./routes/resale');
+const reviewsRouter = require('./routes/reviews');
 const { createAssistant } = require('./services/assistant');
 const { createRazorpay } = require('./services/razorpay');
 const farmerProfileRouter = require('./routes/farmerProfile');
@@ -71,6 +72,7 @@ const createApp = (db, options = {}) => {
   v1.use('/payments', paymentsRouter(db, razorpay));
   v1.use('/resale', resaleRouter(db));
   v1.use('/wallet', walletRouter(db));
+  v1.use('/reviews', reviewsRouter(db));
   v1.use('/assistant/chat', assistantLimiter);
   v1.use('/assistant', assistantRouter(db, assistant));
   v1.use('/operator', operatorRouter(db, roles));

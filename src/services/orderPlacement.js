@@ -35,7 +35,7 @@ const shortAlternatives = (ranked) =>
 //   origin  {latitude, longitude} of the farmer, or null
 //   delivery  null for collection at the center, or {latitude, longitude, phone, label?, village?, note?}
 //           to have a delivery partner bring it. The fee is worked out here, never taken from the client.
-const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin, homeCenterId, timeZone, now = new Date(), delivery = null }) => {
+const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin, homeCenterId, timeZone, now = new Date(), delivery = null, couponCode = null }) => {
   return db.tx(async (c) => {
     // Prices always come from the catalog (or the surplus lot); never trust a
     // client-supplied price.
@@ -64,6 +64,15 @@ const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin,
     });
     const shelfItems = items.filter((i) => !i.surplusLotId);
     const lotItems = items.filter((i) => i.surplusLotId);
+
+    // A coupon takes a percentage off the regular products (surplus is already discounted). The lines are priced
+    // after the discount, so every total, payment and receipt downstream agrees.
+    let coupon = null;
+    if (couponCode) {
+      if (!shelfItems.length) throw new HttpError(400, 'A coupon works on regular products, not on surplus offers');
+      coupon = await require('./fertilizerReviews').checkCoupon(c, owner, couponCode, now);
+      for (const i of shelfItems) i.unitPrice = Math.round(i.unitPrice * (100 - coupon.percent)) / 100;
+    }
     const lotCenters = [...new Set(lots.map((l) => l.centerId))];
     if (lotCenters.length > 1) throw new HttpError(400, "Surplus offers from different centers can't be in one order.");
     if (lotCenters.length && centerId && centerId !== lotCenters[0]) {
@@ -137,8 +146,11 @@ const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin,
       reservedUntil: new Date(now.getTime() + RESERVATION_DAYS * DAY_MS).toISOString(),
       originLatitude: origin ? origin.latitude : null,
       originLongitude: origin ? origin.longitude : null,
+      discountPercent: coupon ? coupon.percent : 0,
+      couponCode: coupon ? coupon.code : null,
     };
     await insertOrder(c, order);
+    if (coupon) await require('./fertilizerReviews').useCoupon(c, coupon.code, order.id);
 
     let job = null;
     if (delivery) {
