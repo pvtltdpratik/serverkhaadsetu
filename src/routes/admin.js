@@ -6,6 +6,7 @@ const { recordAudit } = require('../services/audit');
 const { withItems, serializeOrder } = require('../services/orders');
 const { notify } = require('../services/notifications');
 const surplus = require('../services/surplus');
+const { adminResale } = require('./resaleStaff');
 const partners = require('../services/deliveryPartner');
 const flow = require('../services/deliveryFlow');
 
@@ -35,6 +36,7 @@ module.exports = (db, roles) => {
   const router = express.Router();
   const ah = asyncHandler;
   router.use(roles.requireAdmin);
+  router.use('/resale', adminResale(db)); // complaints about surplus goods, UPI payouts to sellers
 
   // ---- Overview ----
   router.get('/overview', ah(async (req, res) => res.json(await admin.overview(db, roles.adminEmails))));

@@ -113,7 +113,11 @@ const placeAppOrder = async (db, { owner, customerName, lines, centerId, origin,
     }
 
     // If a lot just sold out this throws, and the shelf hold above rolls back with it.
-    if (lotItems.length) await reserveLots(c, chosen, lotItems);
+    if (lotItems.length) {
+      await reserveLots(c, chosen, lotItems);
+      // A farmer's resale that is live but not yet at the center: the seller now has 48 hours to bring it.
+      await require('./resale').onLotsReserved(c, lotItems.map((i) => i.surplusLotId));
+    }
     await checkLowStock(c, chosen, shelfItems.map((i) => i.productId));
 
     const { rows: [center] } = await c.query(

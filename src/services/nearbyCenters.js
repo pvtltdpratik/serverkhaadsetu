@@ -114,6 +114,8 @@ const findNearbySurplus = async (db, { origin, productId = null, radiusKm = WIDE
   return rows
     .map((row) => ({ ...row, rawKm: haversineKm(origin, row) }))
     .filter((row) => row.rawKm <= km)
+    // A farmer's resale is offered to its own center's area first, and to the neighbours after a week.
+    .filter((row) => require('./resale').visibleFrom(row, row.rawKm))
     .sort((a, b) => a.rawKm - b.rawKm || b.catalogPrice - b.unitPrice - (a.catalogPrice - a.unitPrice))
     .slice(0, limit)
     .map(({ rawKm, centerName, village, district, phone, latitude, longitude, isOpen, ...lot }) => ({

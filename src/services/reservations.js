@@ -119,6 +119,8 @@ const consumeOrderStock = async (c, order) => {
     await c.query('UPDATE surplus_lot SET quantity = GREATEST(quantity - $2, 0), reserved = GREATEST(reserved - $2, 0) WHERE id = $1', [surplusLotId, quantity]);
   }
   await c.query('UPDATE orders SET stock_reserved = false WHERE id = $1', [order.id]);
+  // Units that came from a farmer's resale are now sold: the seller is paid.
+  if (lotLines(order).length) await require('./resale').recordSales(c, order);
 };
 
 // A walk-in sale: the goods leave the shelf now, but only from what is not

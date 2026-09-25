@@ -35,7 +35,10 @@ const main = async () => {
     .catch((err) => console.error('Reservation maintenance failed:', err.message))
     .then(() => runReassignment(db, { timeZone: config.centerTimezone }))
     .then((r) => { if (r.moved || r.stuck) console.log(`Reassignment: ${r.moved} orders moved, ${r.stuck} with nowhere to go`); })
-    .catch((err) => console.error('Order reassignment failed:', err.message));
+    .catch((err) => console.error('Order reassignment failed:', err.message))
+    .then(() => require('./services/resale').runMaintenance(db))
+    .then((r) => { if (r.expired) console.log(`Resale: ${r.expired} listings ended (seller did not bring the goods)`); })
+    .catch((err) => console.error('Resale maintenance failed:', err.message));
   maintain();
   const timer = setInterval(maintain, MAINTENANCE_INTERVAL_MS);
   timer.unref();

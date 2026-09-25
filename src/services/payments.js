@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { HttpError } = require('../utils/http');
 const { notify } = require('./notifications');
+const wallet = require('./wallet');
 
 const PAYMENT_COLUMNS = `payment_id AS "paymentId", order_id AS "orderId", amount_paise AS "amountPaise", currency,
   razorpay_order_id AS "razorpayOrderId", status, created_at AS "createdAt", paid_at AS "paidAt"`;
@@ -102,15 +103,21 @@ const verifyPayment = async (db, razorpay, { owner, razorpayOrderId, razorpayPay
 
 // Called inside the transaction that cancels an order: a paid order is queued for a refund.
 const markRefundPending = async (c, orderId) => {
-  const { rowCount } = await c.query("UPDATE payment SET status = 'refund_pending' WHERE order_id = $1 AND status = 'paid'", [orderId]);
-  if (rowCount) await c.query("UPDATE orders SET payment_status = 'refunded' WHERE id = $1", [orderId]);
-  return rowCount > 0;
+  const { rows } = await c.query("UPDATE payment SET status = 'refund_pending' WHERE order_id = $1 AND status = 'paid' RETURNING payment_id, owner_id, method, amount_paise", [orderId]);
+  if (rows.length) await c.query("UPDATE orders SET payment_status = 'refunded' WHERE id = $1", [orderId]);
+  // Money paid from the wallet goes straight back into it; online payments wait for Razorpay's refund.
+  for (const p of rows.filter((r) => r.method === 'wallet')) {
+    await wallet.addEntry(c, p.owner_id, p.amount_paise / 100, 'order_refund', orderId, 'Refund for an order that did not go ahead');
+    await c.query("UPDATE payment SET status = 'refunded', refunded_at = now() WHERE payment_id = $1", [p.payment_id]);
+    await notify(c, p.owner_id, { type: 'order', title: 'Wallet refund', body: `Rs ${money(p.amount_paise / 100)} is back in your wallet.`, refId: orderId });
+  }
+  return rows.length > 0;
 };
 
 // Sends every queued refund to Razorpay. A failure is recorded and retried on the next run.
 const processRefunds = async (db, razorpay) => {
   if (!razorpay.enabled) return { refunded: 0, failed: 0 };
-  const due = (await db.query("SELECT payment_id, owner_id, order_id, razorpay_payment_id, amount_paise FROM payment WHERE status = 'refund_pending' AND razorpay_payment_id IS NOT NULL ORDER BY paid_at LIMIT 20")).rows;
+  const due = (await db.query("SELECT payment_id, owner_id, order_id, razorpay_payment_id, amount_paise FROM payment WHERE status = 'refund_pending' AND method = 'razorpay' AND razorpay_payment_id IS NOT NULL ORDER BY paid_at LIMIT 20")).rows;
   let refunded = 0;
   let failed = 0;
   for (const p of due) {

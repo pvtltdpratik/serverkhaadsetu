@@ -16,11 +16,12 @@ const LOT_LIVE = `l.status = 'active' AND l.quantity - l.reserved > 0 AND (l.bes
 const LOT_COLUMNS = `l.id, l.center_id AS "centerId", l.product_id AS "productId", p.name AS "productName", p.unit_label AS "unit",
   p.price_in_rupees AS "catalogPrice", l.unit_price AS "unitPrice", l.quantity, l.reserved, l.quantity - l.reserved AS "available",
   l.condition, to_char(l.best_before, 'YYYY-MM-DD') AS "bestBefore", l.note, l.from_shelf AS "fromShelf", l.created_at AS "createdAt",
+  (l.resale_id IS NOT NULL) AS "isFarmerResale", l.physical_received AS "inspected", COALESCE(rl.verified_purchase, false) AS "verifiedPurchase",
   CASE WHEN l.status = 'withdrawn' THEN 'withdrawn'
        WHEN l.quantity = 0 THEN 'soldOut'
        WHEN l.best_before IS NOT NULL AND l.best_before < ${TODAY} THEN 'expired'
        ELSE 'active' END AS "status"`;
-const LOT_FROM = 'surplus_lot l JOIN products p ON p.id = l.product_id';
+const LOT_FROM = 'surplus_lot l JOIN products p ON p.id = l.product_id LEFT JOIN resale_listing rl ON rl.id = l.resale_id';
 
 const toMoney = (row) => ({
   ...row,

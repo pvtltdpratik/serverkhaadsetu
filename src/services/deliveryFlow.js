@@ -81,6 +81,7 @@ const handover = async (db, { jobId, centerId, otp, now = new Date() }) => {
     if (wrong) return { wrong };
 
     const order = await findOrder(c, job.order_id, { lock: true });
+    await require('./resale').assertHandable(c, order); // goods a farmer has not yet brought in cannot go out
     await consumeOrderStock(c, order); // the goods leave the shelf now
     await c.query("UPDATE orders SET status = 'readyForPickup' WHERE id = $1 AND status = 'pending'", [order.id]);
     await c.query("UPDATE delivery_job SET status = 'in_transit', picked_up_at = $2 WHERE id = $1", [job.id, now]);

@@ -1,6 +1,7 @@
 const express = require('express');
 const { HttpError, asyncHandler, str, body, deviceId } = require('../utils/http');
 const payments = require('../services/payments');
+const wallet = require('../services/wallet');
 
 // Online payment for an order's goods. The Razorpay key SECRET never leaves the server: the app
 // gets only the public key id, a Razorpay order id and, afterwards, sends back the signature
@@ -29,6 +30,11 @@ module.exports = (db, razorpay) => {
       razorpayPaymentId: str(input.razorpayPaymentId, 'razorpayPaymentId', { max: 100 }),
       signature: str(input.razorpaySignature, 'razorpaySignature', { max: 200 }),
     }));
+  }));
+
+  // Pays an order's goods from the platform wallet (all of it, or nothing).
+  router.post('/wallet', ah(async (req, res) => {
+    res.json(await wallet.payOrder(db, { owner: deviceId(req), orderId: str(body(req).orderId, 'orderId', { max: 100 }) }));
   }));
 
   router.get('/orders/:orderId', ah(async (req, res) => res.json(await payments.paymentsForOrder(db, deviceId(req), req.params.orderId))));

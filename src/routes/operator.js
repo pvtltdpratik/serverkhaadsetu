@@ -8,6 +8,8 @@ const centers = require('../services/centerService');
 const surplus = require('../services/surplus');
 const partners = require('../services/deliveryPartner');
 const flow = require('../services/deliveryFlow');
+const resale = require('../services/resale');
+const { operatorResale } = require('./resaleStaff');
 const { deductWalkIn, deductWalkInLots, consumeOrderStock } = require('../services/reservations');
 const { checkLowStock } = require('../services/stockAlerts');
 const { notifyBackInStock, notifyNewSurplus } = require('../services/backInStock');
@@ -26,6 +28,7 @@ module.exports = (db, roles) => {
   const router = express.Router();
   const ah = asyncHandler;
   router.use(roles.requireOperator);
+  router.use('/resale', operatorResale(db)); // farmers' leftover fertilizer: checks, counter intake, cash payouts
   const view = (order) => serializeOrder(order, { includeOtp: false });
 
   // An order that belongs to another center (or to none yet) is a 404, not a 403.
@@ -177,6 +180,8 @@ module.exports = (db, roles) => {
         centerId: req.center.centerId,
       };
       await insertOrder(c, created);
+      // Surplus lines that came from a farmer's resale pay that farmer.
+      if (items.some((i) => i.surplusLotId)) await resale.recordSales(c, created);
       return created;
     });
     res.status(201).json(view(order));
@@ -188,6 +193,7 @@ module.exports = (db, roles) => {
     const order = await db.tx(async (c) => {
       const current = ownCenterOrder(req, await findOrder(c, req.params.id, { lock: true }));
       if (current.status === 'pending') {
+        await resale.assertHandable(c, current); // goods a farmer has not yet brought in cannot be readied
         await c.query("UPDATE orders SET status = 'readyForPickup' WHERE id = $1", [current.id]);
         await notify(c, current.ownerId, {
           type: 'order',
@@ -215,6 +221,7 @@ module.exports = (db, roles) => {
       const match = expected.length === given.length && crypto.timingSafeEqual(expected, given);
       if (!match) throw new HttpError(400, 'Incorrect OTP — please check with the farmer and try again.');
 
+      await resale.assertHandable(c, current);
       await c.query("UPDATE orders SET status = 'completed', pickup_otp = NULL WHERE id = $1", [current.id]);
       await consumeOrderStock(c, current); // the goods leave the shelf
       // The first center a farmer actually collects from becomes their home center.
