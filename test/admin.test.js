@@ -125,6 +125,7 @@ test('overview counts what needs attention', async () => {
   assert.equal(o.orders.pending, 0);
   assert.equal(o.restockRequests.pending, 0);
   assert.equal(o.lowStockItems, 0);
+  assert.deepEqual(o.resale, { disputesOpen: 0, upiPending: 0, listingsOpen: 0 }, 'farmer resale starts empty');
   // Home delivery starts empty: nobody has applied and nothing is on the road.
   assert.deepEqual(o.delivery, {
     jobs: { waiting: 0, needDriver: 0, onTheRoad: 0, deliveredToday: 0 },

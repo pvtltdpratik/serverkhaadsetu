@@ -96,12 +96,13 @@ const LISTING_COLUMNS = `r.id, r.seller_id AS "sellerId", r.seller_name AS "sell
   r.asking_price AS "askingPrice", r.suggested_price AS "suggestedPrice", r.final_price AS "finalPrice", r.payout_mode AS "payoutMode",
   r.upi_id AS "upiId", r.verified_purchase AS "verifiedPurchase", r.status, r.lot_id AS "lotId", r.inspection, r.inspected_at AS "inspectedAt",
   r.handover_due AS "handoverDue", r.reject_reason AS "rejectReason", r.season, r.created_at AS "createdAt",
-  c.name AS "centerName", c.village AS "centerVillage",
+  c.name AS "centerName", c.village AS "centerVillage", COALESCE(NULLIF(r.seller_name, ''), pr.name, 'Farmer') AS "sellerDisplayName",
+  COALESCE(NULLIF(r.seller_phone, ''), pr.contact_phone, '') AS "sellerContact",
   (SELECT count(*)::int FROM resale_photo ph WHERE ph.listing_id = r.id) AS "photoCount",
   COALESCE((SELECT l.quantity - l.reserved FROM surplus_lot l WHERE l.id = r.lot_id), 0) AS "unitsAvailable",
   COALESCE((SELECT l.reserved FROM surplus_lot l WHERE l.id = r.lot_id), 0) AS "unitsReserved",
   COALESCE((SELECT sum(s.units) FROM resale_sale s WHERE s.listing_id = r.id), 0)::int AS "unitsSold"`;
-const LISTING_FROM = 'resale_listing r JOIN products p ON p.id = r.product_id JOIN village_center c ON c.center_id = r.center_id';
+const LISTING_FROM = 'resale_listing r JOIN products p ON p.id = r.product_id JOIN village_center c ON c.center_id = r.center_id LEFT JOIN profiles pr ON pr.owner_id = r.seller_id';
 
 const shape = (row) => row && ({
   ...row,

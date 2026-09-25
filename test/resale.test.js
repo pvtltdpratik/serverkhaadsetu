@@ -251,6 +251,7 @@ test('remote pre-approval puts it live; a buyer starts the 48-hour clock; inspec
   // The operator sees it in the queue and can look at the photos.
   const queue = (await call('GET', '/v1/operator/resale', { device: c.device })).json;
   assert.deepEqual(queue.map((l) => l.id), [sent.id]);
+  assert.equal(queue[0].sellerDisplayName, 'Farmer');
   assert.equal((await fetch(`${base}/v1/operator/resale/${sent.id}/photos/front`, { headers: { 'x-device-id': c.device } })).status, 200);
   assert.equal((await call('GET', '/v1/operator/resale', { device: 'op-of-another-center' })).status, 403);
   const otherCenter = await makeCenter('other');
@@ -453,6 +454,7 @@ test('a registered farmer selling at the counter is verified by their purchases 
   assert.equal(pending.length, 1);
   assert.equal(pending[0].upiId, 'sunita@okbank');
   assert.equal(pending[0].amount, 340.87);
+  assert.equal((await call('GET', '/v1/admin/overview', { device: 'admin' })).json.resale.upiPending, 1);
   const paid = await call('POST', `/v1/admin/resale/payouts/${pending[0].saleId}/paid`, { device: 'admin', body: { reference: 'UTR123' } });
   assert.equal(paid.status, 200);
   assert.equal((await call('POST', `/v1/admin/resale/payouts/${pending[0].saleId}/paid`, { device: 'admin', body: {} })).status, 409);

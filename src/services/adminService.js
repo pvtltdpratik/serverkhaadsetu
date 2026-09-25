@@ -48,7 +48,7 @@ const userSummary = async (db, adminEmails) => {
 
 const overview = async (db, adminEmails, now = new Date()) => {
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const [people, centers, orders, restock, lowStock, unattended, discrepancies, surplusStats, deliveryJobs, deliveryPartners, deliveryCash] = await Promise.all([
+  const [people, centers, orders, restock, lowStock, unattended, discrepancies, surplusStats, deliveryJobs, deliveryPartners, deliveryCash, resale] = await Promise.all([
     userSummary(db, adminEmails),
     db.one(
       `SELECT count(*) FILTER (WHERE status = 'active')::int AS active,
@@ -84,12 +84,18 @@ const overview = async (db, adminEmails, now = new Date()) => {
          FROM delivery_partner`),
     // Cash partners collected for goods and have not yet handed to a center.
     db.one("SELECT COALESCE(SUM(amount), 0)::float AS owed FROM delivery_ledger WHERE kind IN ('goods_owed','goods_settled')"),
+    // Farmers' resale: complaints waiting for a decision, and UPI payouts still to send.
+    db.one(
+      `SELECT (SELECT count(*)::int FROM resale_dispute WHERE status = 'open') AS "disputesOpen",
+              (SELECT count(*)::int FROM resale_sale WHERE payout_status = 'pending') AS "upiPending",
+              (SELECT count(*)::int FROM resale_listing WHERE status IN ('pending_verification','inspection_required','live','awaiting_handover','listed')) AS "listingsOpen"`),
   ]);
   return {
     people, centers, orders, restockRequests: restock,
     lowStockItems: lowStock.n, lowStockUnattended: unattended.n, discrepanciesOpen: discrepancies.n,
     surplus: surplusStats,
     delivery: { jobs: deliveryJobs, partners: deliveryPartners, cashOwed: deliveryCash.owed },
+    resale,
   };
 };
 
