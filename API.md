@@ -628,7 +628,7 @@ All of these need the signed-in farmer's token unless marked otherwise.
 ### Fertilizer reviews (`/v1/reviews`)
 - `GET /reference/crops`, `GET /eligible`, `GET /prefill/:productId`, `POST /` (baseline, returns a 5% coupon), `POST /:id/mid` (from day 28), `POST /:id/post` (harvest, from day 45), `POST /:id/photos/:kind`, `GET /mine`.
 - `GET /product/:productId?soil=&crop=&season=&size=&improved=` summary and cards; `GET /product/:productId/prediction?crop=&acres=` predicted yield range.
-- `GET /rewards`, `POST /rewards/redeem {coins}` (100 coins = 25 rupees in the wallet). A yield above +80%, below -50% or over 3 times the district average is held for an agronomist (`GET /flagged`, `POST /:id/decide`, `POST /:id/feature`, `GET /training-data`, admin only).
+- `GET /rewards`, `POST /rewards/redeem {coins}` (100 coins = 25 rupees in the wallet). A yield above +80%, below -50% or over 3 times the district average is held for an agronomist (admin only, under `/v1/admin/reviews`: `GET /flagged`, `POST /:id/decide`, `POST /:id/feature`, `GET /training-data`).
 - `POST /v1/orders` accepts `couponCode`; the percentage comes off regular products only.
 
 ### Environment
