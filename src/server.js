@@ -3,6 +3,7 @@ const { ensureDatabaseExists } = require('./db/bootstrap');
 const { createDb } = require('./db/database');
 const { seedIfEmpty } = require('./db/seed');
 const { syncSchemeCatalog } = require('./services/schemeCatalogSync');
+const { processRefunds } = require('./services/payments');
 const { createApp } = require('./app');
 const { runReservationMaintenance } = require('./services/reservationJobs');
 const { runReassignment } = require('./services/reassignment');
@@ -24,6 +25,7 @@ const main = async () => {
   await syncSchemeCatalog(db);
 
   const app = createApp(db);
+  if (!app.locals.razorpay.enabled) console.log('Online payments are off (RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET not set)');
   const server = app.listen(config.port, () => console.log(`API server listening on port ${config.port}`));
 
   // Expire overdue reservations and send day-3 / day-5 reminders. Safe on every
@@ -43,7 +45,13 @@ const main = async () => {
   const dispatch = () => runDeliveryDispatch(db, { timeZone: config.centerTimezone })
     .then((r) => { if (r.offered || r.fellBack) console.log(`Deliveries: ${r.offered} offers sent, ${r.fellBack} fell back to pickup`); })
     .catch((err) => console.error('Delivery dispatch failed:', err.message));
-  const dispatchTimer = setInterval(dispatch, DISPATCH_INTERVAL_MS);
+  const dispatchTimer = setInterval(() => {
+    dispatch();
+    // Send any queued refunds (a paid order that was cancelled or expired) to Razorpay.
+    processRefunds(db, app.locals.razorpay)
+      .then((r) => { if (r.refunded || r.failed) console.log(`Refunds: ${r.refunded} sent, ${r.failed} failed (will retry)`); })
+      .catch((err) => console.error('Refund run failed:', err.message));
+  }, DISPATCH_INTERVAL_MS);
   dispatchTimer.unref();
 
   // Let in-flight requests finish and return connections before exiting.

@@ -4,7 +4,7 @@ const { releaseOrderStock } = require('./reservations');
 
 const ORDER_COLUMNS = `id, customer_name AS "customerName", type, status, created_at AS "createdAt", pickup_otp AS "pickupOtp",
   owner_id AS "ownerId", center_id AS "centerId", stock_reserved AS "stockReserved", reserved_until AS "reservedUntil",
-  fulfilment, delivery_fee AS "deliveryFee"`;
+  fulfilment, delivery_fee AS "deliveryFee", payment_status AS "paymentStatus", paid_at AS "paidAt"`;
 
 const newOrderId = () => `order-${crypto.randomUUID()}`;
 const newOtp = () => String(crypto.randomInt(0, 10000)).padStart(4, '0');
@@ -35,8 +35,9 @@ const serializeOrder = (order, { includeOtp }) => {
     fulfilment: order.fulfilment || 'pickup',
     deliveryFee: Number(order.deliveryFee || 0),
     totalAmount: totalOf(order),
-    // Goods plus the delivery fee: what the buyer pays in cash when it arrives.
-    payableAmount: totalOf(order) + Number(order.deliveryFee || 0),
+    paymentStatus: order.paymentStatus || 'unpaid',
+    // What the buyer still pays in cash: the goods unless they were paid online, plus the delivery fee.
+    payableAmount: (order.paymentStatus === 'paid' ? 0 : totalOf(order)) + Number(order.deliveryFee || 0),
     itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0),
   };
 };
@@ -59,6 +60,7 @@ const cancelOrder = async (db, id, onCancelled) =>
     // A delivery on the way cannot be called back; anything earlier is ended with the order.
     await require('./deliveryJobs').cancelJobForOrder(c, id, 'The order was cancelled');
     await c.query("UPDATE orders SET status = 'cancelled', pickup_otp = NULL WHERE id = $1", [id]);
+    await require('./payments').markRefundPending(c, id); // money paid online is queued to go back
     await releaseOrderStock(c, order); // the held stock goes back on the shelf
     if (onCancelled) await onCancelled(c, order);
     return { ...order, status: 'cancelled', pickupOtp: null };

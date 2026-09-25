@@ -5,7 +5,7 @@ const { catalog } = require('../data/schemeCatalog');
 // the first seed set is left alone. Safe to run on every start.
 const syncSchemeCatalog = async (db) => {
   await db.tx(async (c) => {
-    await c.query('SELECT pg_advisory_xact_lock(727203)');
+    await c.query('SELECT pg_advisory_xact_lock(727210)');
     for (const s of catalog) {
       await c.query(
         `INSERT INTO schemes (id, name, agency, category, description, benefit, eligibility_criteria, level, sector, audience,

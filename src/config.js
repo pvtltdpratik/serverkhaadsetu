@@ -44,5 +44,12 @@ module.exports = {
     // Most farmer-to-farmer requests one person may have open at once.
     maxOpenP2p: Number(process.env.DELIVERY_MAX_OPEN_P2P) || 5,
   },
+  // Razorpay online payments. The SECRET is read only here, from the environment, and is never sent to
+  // the app or written to git. Leave the key id empty to switch online payment off.
+  razorpay: {
+    keyId: process.env.RAZORPAY_KEY_ID || '',
+    keySecret: process.env.RAZORPAY_KEY_SECRET || '',
+    webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || '',
+  },
   corsOrigin: process.env.CORS_ORIGIN || '*',
 };

@@ -18,6 +18,8 @@ const schemesRouter = require('./routes/schemes');
 const operatorRouter = require('./routes/operator');
 const adminRouter = require('./routes/admin');
 const meRouter = require('./routes/me');
+const paymentsRouter = require('./routes/payments');
+const { createRazorpay } = require('./services/razorpay');
 const farmerProfileRouter = require('./routes/farmerProfile');
 const centersRouter = require('./routes/centers');
 const deliveryRouter = require('./routes/delivery');
@@ -32,6 +34,7 @@ const createApp = (db, options = {}) => {
     authEnabled: auth.enabled,
     superAdminEmails: options.superAdminEmails || config.superAdminEmails,
   });
+  const razorpay = options.razorpay || createRazorpay(config.razorpay);
   const app = express();
 
   // Behind Nginx on EC2: trust one proxy hop so rate limiting sees real client IPs.
@@ -39,9 +42,12 @@ const createApp = (db, options = {}) => {
   app.use(helmet());
   app.use(cors({ origin: config.corsOrigin === '*' ? true : config.corsOrigin.split(',') }));
   if (process.env.NODE_ENV !== 'test') app.use(morgan('combined'));
-  app.use(express.json({ limit: '100kb' }));
+  // The raw bytes are kept for Razorpay's webhook, whose signature is over the exact body.
+  app.use(express.json({ limit: '100kb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
   app.use('/health', healthRouter);
+  // Razorpay calls this itself: no login or API key, only its signature.
+  app.post('/webhooks/razorpay', paymentsRouter.webhook(db, razorpay));
 
   const v1 = express.Router();
   v1.use(generalLimiter);
@@ -58,12 +64,14 @@ const createApp = (db, options = {}) => {
   v1.use('/me', meRouter(db, roles));
   v1.use('/centers', centersRouter(db));
   v1.use('/delivery', deliveryRouter(db));
+  v1.use('/payments', paymentsRouter(db, razorpay));
   v1.use('/operator', operatorRouter(db, roles));
   v1.use('/admin', adminRouter(db, roles));
   app.use('/v1', v1);
 
   app.use(notFound);
   app.use(errorHandler);
+  app.locals.razorpay = razorpay;
   return app;
 };
 
