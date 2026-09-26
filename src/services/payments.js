@@ -42,7 +42,16 @@ const startPayment = async (db, razorpay, { owner, orderId, contact = {} }) => {
   const open = (await db.query(
     "SELECT * FROM payment WHERE order_id = $1 AND status = 'created' AND amount_paise = $2 ORDER BY created_at DESC LIMIT 1", [orderId, amountPaise],
   )).rows[0];
-  if (open) return describe(open);
+  if (open) {
+    // Razorpay may already have taken the money for this order while the app never heard back (its error
+    // screen, a lost signal). Offering the same paid order again would leave the farmer stuck, so settle it first.
+    const taken = await razorpay.capturedPayment(open.razorpay_order_id).catch(() => null);
+    if (taken) {
+      const done = await markPaid(db, { razorpayOrderId: open.razorpay_order_id, razorpayPaymentId: taken.id });
+      throw new HttpError(409, done.status === 'paid' ? 'This order is already paid' : 'Your earlier payment arrived after the order could no longer take it, and it is being refunded');
+    }
+    return describe(open);
+  }
 
   const paymentId = `pay-${crypto.randomUUID()}`;
   const created = await razorpay.createOrder({ amountPaise, receipt: paymentId, notes: { orderId, owner } });

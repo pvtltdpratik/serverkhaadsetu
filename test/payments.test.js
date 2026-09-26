@@ -23,7 +23,13 @@ let failRefunds = false;
 let fakeIds = 0;
 
 // A stand-in for api.razorpay.com: records what would have been sent and answers like it does.
+const alreadyCaptured = new Map(); // razorpay order id -> payment id that Razorpay took without telling the app
 const fakeFetch = async (url, init) => {
+  if (init.method === 'GET') {
+    const m = url.match(/\/orders\/([^/]+)\/payments$/);
+    const id = m && alreadyCaptured.get(m[1]);
+    return new Response(JSON.stringify({ items: id ? [{ id, status: 'captured', method: 'upi' }] : [{ id: 'pay_failed1', status: 'failed' }] }), { status: 200 });
+  }
   const body = JSON.parse(init.body);
   razorpayCalls.push({ url, auth: init.headers.Authorization, body });
   if (url.endsWith('/orders')) return new Response(JSON.stringify({ id: `order_R${(fakeIds += 1)}`, amount: body.amount }), { status: 200 });
@@ -287,4 +293,34 @@ test('a home delivery paid online leaves the partner only the fee to collect', a
   assert.equal(Number(after.fee), Number(before.fee));
   const mine = (await call('GET', `/v1/orders/${order.id}`, { device: 'deliv-buyer' })).json;
   assert.equal(mine.payableAmount, Number(before.fee), 'the buyer now owes only the delivery fee, in cash');
+});
+
+test('a payment Razorpay took but the app never heard about is settled the next time the farmer taps Pay', async () => {
+  const c = await makeCenter('missed');
+  const order = await placeOrder(c, 'missed-buyer');
+  const started = (await call('POST', '/v1/payments/orders', { device: 'missed-buyer', body: { orderId: order.id } })).json;
+  assert.equal((await call('GET', `/v1/orders/${order.id}`, { device: 'missed-buyer' })).json.paymentStatus, 'unpaid');
+
+  // The farmer paid, but Razorpay's screen showed an error and the app never called verify.
+  alreadyCaptured.set(started.razorpayOrderId, 'pay_TOOKMONEY');
+  const again = await call('POST', '/v1/payments/orders', { device: 'missed-buyer', body: { orderId: order.id } });
+  assert.equal(again.status, 409, 'the paid Razorpay order is not offered again');
+  assert.match(again.json.error, /already paid/);
+
+  const mine = (await call('GET', `/v1/orders/${order.id}`, { device: 'missed-buyer' })).json;
+  assert.equal(mine.paymentStatus, 'paid');
+  assert.equal(mine.payableAmount, 0);
+  const alerts = (await call('GET', '/v1/farmer/notifications', { device: 'missed-buyer' })).json.map((n) => n.title);
+  assert.ok(alerts.includes('Payment received'));
+});
+
+test('an unpaid Razorpay order is offered again, not created twice', async () => {
+  const c = await makeCenter('lookup');
+  const order = await placeOrder(c, 'lookup-buyer');
+  const first = (await call('POST', '/v1/payments/orders', { device: 'lookup-buyer', body: { orderId: order.id } })).json;
+  const before = razorpayCalls.length;
+  const second = await call('POST', '/v1/payments/orders', { device: 'lookup-buyer', body: { orderId: order.id } });
+  assert.equal(second.status, 201);
+  assert.equal(second.json.razorpayOrderId, first.razorpayOrderId, 'the same unpaid Razorpay order is reused');
+  assert.equal(razorpayCalls.length, before, 'no second order was created');
 });

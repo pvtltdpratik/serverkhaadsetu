@@ -39,12 +39,32 @@ const createRazorpay = ({ keyId, keySecret, webhookSecret = '', fetchImpl = fetc
     return json;
   };
 
+  const get = async (path) => {
+    if (!enabled) throw new HttpError(503, 'Online payments are not set up on this server');
+    let res;
+    try {
+      res = await fetchImpl(`${API}${path}`, { method: 'GET', headers: { Authorization: auth }, signal: AbortSignal.timeout(15000) });
+    } catch (err) {
+      throw new HttpError(502, 'Could not reach the payment service. Please try again.');
+    }
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new HttpError(res.status >= 500 ? 502 : 400, `The payment service refused this: status ${res.status}`);
+    return json;
+  };
+
   return {
     enabled,
     // The public half: safe to give to the app.
     keyId: enabled ? keyId : '',
 
     createOrder: ({ amountPaise, receipt, notes = {} }) => request('/orders', { amount: amountPaise, currency: 'INR', receipt, notes }),
+
+    // The payment Razorpay already took on this order, if any. The app can miss the answer (an error
+    // screen, a lost signal) after the money has gone through, so the server asks before offering the order again.
+    capturedPayment: async (razorpayOrderId) => {
+      const json = await get(`/orders/${encodeURIComponent(razorpayOrderId)}/payments`);
+      return (json.items || []).find((p) => p.status === 'captured') || null;
+    },
 
     refund: (paymentId, { amountPaise, notes = {} }) => request(`/payments/${encodeURIComponent(paymentId)}/refund`, { amount: amountPaise, notes }),
 
