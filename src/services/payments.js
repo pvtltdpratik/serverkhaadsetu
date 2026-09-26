@@ -63,6 +63,23 @@ const startPayment = async (db, razorpay, { owner, orderId, contact = {} }) => {
   return describe(row);
 };
 
+// The app asks this after Razorpay's checkout reported a failure or a cancel: the money may have gone through
+// anyway (a UPI app returning to ours, a lost signal). Asks Razorpay about every unpaid attempt on the order,
+// records a payment that was taken, and answers where the order stands.
+const syncPayment = async (db, razorpay, { owner, orderId }) => {
+  const order = (await db.query('SELECT id, owner_id FROM orders WHERE id = $1', [orderId])).rows[0];
+  if (!order || order.owner_id !== owner) throw new HttpError(404, 'Order not found');
+  if (razorpay.enabled) {
+    const open = (await db.query("SELECT razorpay_order_id FROM payment WHERE order_id = $1 AND status = 'created'", [orderId])).rows;
+    for (const p of open) {
+      const taken = await razorpay.capturedPayment(p.razorpay_order_id).catch(() => null);
+      if (taken) await markPaid(db, { razorpayOrderId: p.razorpay_order_id, razorpayPaymentId: taken.id });
+    }
+  }
+  const now = (await db.query('SELECT payment_status FROM orders WHERE id = $1', [orderId])).rows[0];
+  return { orderId, paymentStatus: now.payment_status };
+};
+
 // Records that Razorpay took the money. Idempotent: the app's verify call and Razorpay's webhook
 // both arrive, in either order, and only the first changes anything.
 const markPaid = async (db, { razorpayOrderId, razorpayPaymentId }) =>
@@ -148,4 +165,5 @@ const processRefunds = async (db, razorpay) => {
 const paymentsForOrder = async (db, owner, orderId) =>
   (await db.query(`SELECT ${PAYMENT_COLUMNS} FROM payment WHERE order_id = $1 AND owner_id = $2 ORDER BY created_at DESC`, [orderId, owner])).rows;
 
-module.exports = { startPayment, markPaid, verifyPayment, markRefundPending, processRefunds, paymentsForOrder, goodsPaise };
+module.exports = {
+  syncPayment, startPayment, markPaid, verifyPayment, markRefundPending, processRefunds, paymentsForOrder, goodsPaise };

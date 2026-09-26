@@ -37,6 +37,9 @@ module.exports = (db, razorpay) => {
     res.json(await wallet.payOrder(db, { owner: deviceId(req), orderId: str(body(req).orderId, 'orderId', { max: 100 }) }));
   }));
 
+  // "Did it go through after all?" Safe to call any number of times.
+  router.post('/orders/:orderId/sync', ah(async (req, res) => res.json(await payments.syncPayment(db, razorpay, { owner: deviceId(req), orderId: req.params.orderId }))));
+
   router.get('/orders/:orderId', ah(async (req, res) => res.json(await payments.paymentsForOrder(db, deviceId(req), req.params.orderId))));
 
   return router;

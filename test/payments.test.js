@@ -324,3 +324,27 @@ test('an unpaid Razorpay order is offered again, not created twice', async () =>
   assert.equal(second.json.razorpayOrderId, first.razorpayOrderId, 'the same unpaid Razorpay order is reused');
   assert.equal(razorpayCalls.length, before, 'no second order was created');
 });
+
+test('the app can ask whether an order was paid after all, and only its owner can', async () => {
+  const c = await makeCenter('sync');
+  const order = await placeOrder(c, 'sync-buyer');
+  const started = (await call('POST', '/v1/payments/orders', { device: 'sync-buyer', body: { orderId: order.id } })).json;
+
+  // Nothing was paid: the answer is "unpaid" and nothing changes.
+  const none = await call('POST', `/v1/payments/orders/${order.id}/sync`, { device: 'sync-buyer' });
+  assert.equal(none.status, 200, none.text);
+  assert.deepEqual(none.json, { orderId: order.id, paymentStatus: 'unpaid' });
+
+  // Razorpay took the money, but the app was shown an error and never called verify.
+  alreadyCaptured.set(started.razorpayOrderId, 'pay_SYNCED');
+  const paid = await call('POST', `/v1/payments/orders/${order.id}/sync`, { device: 'sync-buyer' });
+  assert.deepEqual(paid.json, { orderId: order.id, paymentStatus: 'paid' });
+  assert.equal((await call('GET', `/v1/orders/${order.id}`, { device: 'sync-buyer' })).json.payableAmount, 0);
+  assert.equal((await call('GET', '/v1/farmer/notifications', { device: 'sync-buyer' })).json.filter((n) => n.title === 'Payment received').length, 1);
+
+  // Asking again is harmless and does not notify twice.
+  assert.equal((await call('POST', `/v1/payments/orders/${order.id}/sync`, { device: 'sync-buyer' })).json.paymentStatus, 'paid');
+  assert.equal((await call('GET', '/v1/farmer/notifications', { device: 'sync-buyer' })).json.filter((n) => n.title === 'Payment received').length, 1);
+
+  assert.equal((await call('POST', `/v1/payments/orders/${order.id}/sync`, { device: 'someone-else' })).status, 404, 'not their order');
+});
