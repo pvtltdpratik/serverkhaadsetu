@@ -57,7 +57,7 @@ module.exports = {
     apiKey: process.env.GEMINI_API_KEY || '',
     model: process.env.GEMINI_MODEL || 'gemini-flash-latest',
     // Tried when the main model is busy.
-    fallbackModel: process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.8-flash',
+    fallbackModel: process.env.GEMINI_FALLBACK_MODEL || 'gemini-flash-lite-latest',
   },
   corsOrigin: process.env.CORS_ORIGIN || '*',
 };
